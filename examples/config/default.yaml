@@ -1,0 +1,20 @@
+database:
+  path: data.db
+
+logging:
+  console:
+    level: info
+  file:
+    directory:  logs
+    level:      debug
+
+scanner:
+  interval:     "@weekly"
+  image_age:    7
+  scan_all:     false
+  scan_stopped: false
+
+updater:
+  stop_timeout:     30
+  remove_volumes:   false
+  remove_images:    false

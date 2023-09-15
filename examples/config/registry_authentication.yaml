@@ -1,0 +1,8 @@
+registries:
+  - domain:     docker.io
+    username:   123
+    password:   123
+  - domain:     custom_registry.tld
+    username:   321
+    password:   321
+    insecure:   true

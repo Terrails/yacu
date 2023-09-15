@@ -1,0 +1,11 @@
+webhooks:
+  discord:
+    url: webhook_url
+    author:
+      name:     server_name
+      url:      webui_url
+      icon_url: author_icon_url
+    kind:
+      errors:             true
+      container_success:  true
+      image_success:      true
