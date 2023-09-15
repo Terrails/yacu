@@ -121,5 +121,5 @@ webhooks:
 ## Labels
 
 `yacu.enable` — allow/disallow yacu from scanning the container, bypasses `scanner.scan_all` [`true`, `false`]  
-`yacu.image_age` — minimum time an image should be released for before pulling and recreating the container, used to bypass `scanner.image_age`  
+`yacu.image_age` — minimum time in days that an image should be released for before pulling and recreating the container, used to bypass `scanner.image_age`  
 `yacu.stop_timeout` — amount of time in seconds to wait for a container to stop before forcefully killing it, used to bypass `updater.stop_timeout` 
