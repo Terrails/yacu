@@ -500,7 +500,7 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.Con
 			depVals := strings.Split(value, ":")
 
 			dependency := depVals[0]
-			if dependency != dependsOn.Name {
+			if dependency != dependsOn.Name[1:] {
 				continue
 			}
 
