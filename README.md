@@ -9,7 +9,7 @@ Put simply. A chosen container will only be updated if it's remote image is olde
 ## Configuration
 A config file is optional but highly recommended.  
 
-YACU searches for a `yacu.yaml` config file in the same directory as the executable or uses a path passed via `--config` command line parameter.
+YACU searches for a `yacu.yaml` config file in current working directory or uses a path passed via `--config` command line parameter.
 
 In case of the docker container, `yacu.yaml` should be mounted in `/data` path of the container
 
