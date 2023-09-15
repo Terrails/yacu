@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - master
+    paths:
+      - main/**
+      - types/**
+      - utils/**
+      - Dockerfile
+      - go.mod
+      - go.sum
 
 jobs:
   build-and-push:
