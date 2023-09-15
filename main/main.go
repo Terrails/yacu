@@ -27,8 +27,6 @@ func main() {
 	logger := config.Logging.CreateLogger()
 	logger.Debug().Msg("logger initialized")
 
-	logger.Debug().Str("config", fmt.Sprintf("%v", *config)).Msg("config loaded")
-
 	ctx := logger.WithContext(context.Background())
 
 	client, err := client.NewClientWithOpts(client.FromEnv)
