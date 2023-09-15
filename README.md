@@ -1,4 +1,4 @@
-# yacu — Yet Another Container Update
+# yacu — Yet Another Container Updater
 
 ### **WARNING**: Still in really early development with not enough testing done. Recommended only for non-critical systems.
 
