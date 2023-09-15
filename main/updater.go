@@ -495,14 +495,12 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.Con
 		if len(val) == 0 {
 			continue
 		}
-		logger.Debug().Str("depending_container", container.Names[0]).Msg("Analyzing depending_container")
 
 		for _, value := range strings.Split(val, ",") {
 			depVals := strings.Split(value, ":")
 
 			dependency := depVals[0]
 			if dependency != dependsOn.Name {
-				logger.Debug().Str("depending_container", container.Names[0]).Msg("Skipped depending_container")
 				continue
 			}
 
@@ -527,7 +525,6 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.Con
 			}
 
 			container := yacucontainer.NewDependant(&container, app.Updater.StopTimeout, dependsOn, condition)
-			logger.Debug().Str("depending_container", container.Name).Msg("Found depending_container")
 			dependantContainers = append(dependantContainers, container)
 			// can be stopped as there cannot be multiple instances of the same dependency
 			break
