@@ -400,9 +400,9 @@ func (app Yacu) IsLatestImagePresent(ctx context.Context, named reference.NamedT
 		return false, fmt.Errorf("inspecting image %s failed: %w", named.String(), err)
 	}
 
-	repoNoDomain := fmt.Sprintf("%s:%s", reference.Path(named), named.Tag())
+	familiarNameTagged := utils.FamiliarTagged(named)
 
-	dbImage, err := app.DB.GetRemoteImageFromName(repoNoDomain)
+	dbImage, err := app.DB.GetRemoteImageFromName(familiarNameTagged)
 	if err != nil {
 		logger.Err(err).Msg("Fetching remote image data from local database failed")
 		return false, fmt.Errorf("fetching remote image data (%s) from local database failed: %w", named.String(), err)
