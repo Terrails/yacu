@@ -1,21 +1,25 @@
-FROM golang:1.26-alpine
+FROM golang:1.26-alpine AS build
 
-WORKDIR /app
+WORKDIR /src
 
-# install build dependencies
-RUN apk add --no-cache tzdata build-base lvm2-dev btrfs-progs-dev gpgme-dev
-ENV TZ=Europe/London
+# Build dependencies required by CGO-enabled modules.
+RUN apk add --no-cache build-base lvm2-dev btrfs-progs-dev gpgme-dev
 
-# copy all files into container
-COPY . ./
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-# install go dependencies
-RUN go mod download
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+	CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/yacu ./main
 
-# compile
-RUN CGO_ENABLED=1 go build -o /yacu /app/main
+FROM alpine:3.22
 
-# change workdir to folder that should be mounted
 WORKDIR /data
 
-CMD ["/yacu"]
+# Runtime-only libs for the linked binary.
+RUN apk add --no-cache ca-certificates tzdata sqlite-libs gpgme libstdc++ lvm2-libs btrfs-progs
+ENV TZ=Europe/London
+
+COPY --from=build /out/yacu /usr/local/bin/yacu
+
+ENTRYPOINT ["/usr/local/bin/yacu"]
