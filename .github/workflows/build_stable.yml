@@ -1,0 +1,24 @@
+name: Build (Stable)
+
+on:
+	workflow_dispatch:
+
+jobs:
+	build-and-push:
+		runs-on: ubuntu-latest
+		steps:
+			- name: Checkout stable
+				uses: actions/checkout@v4
+
+			- name: Login to Github registry
+				uses: docker/login-action@v3
+				with:
+					registry: ghcr.io
+					username: ${{ github.actor }}
+					password: ${{ secrets.GITHUB_TOKEN }}
+
+			- name: Build and push image
+				uses: docker/build-push-action@v5
+				with:
+					push: true
+					tags: ghcr.io/terrails/yacu:stable
