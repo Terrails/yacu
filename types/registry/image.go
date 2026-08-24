@@ -8,7 +8,7 @@ import (
 	"github.com/containers/image/v5/docker"
 	"github.com/containers/image/v5/image"
 	"github.com/containers/image/v5/manifest"
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 	"github.com/rs/zerolog"
 	"github.com/terrails/yacu/types/config"

@@ -3,7 +3,7 @@ package utils
 import (
 	"fmt"
 
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 )
 
 func FamiliarTagged(repository reference.NamedTagged) string {
