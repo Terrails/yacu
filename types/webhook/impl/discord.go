@@ -16,7 +16,7 @@ import (
 
 type DiscordWebhook struct {
 	config *config.Webhook
-	client webhook.Client
+	client *webhook.Client
 }
 
 func SetupDiscordWebhook(ctx context.Context, config *config.Webhook) (*DiscordWebhook, error) {
@@ -38,10 +38,9 @@ func (hook *DiscordWebhook) Error(ctx context.Context, context string, err error
 
 	if _, err := hook.client.CreateEmbeds([]discord.Embed{
 		hook.getStartingEmbedBuilder().
-			SetTitle("An error occurred during update").
-			SetDescription(fmt.Sprintf("**%s**\n```%v```", context, err)).
-			SetColor(12723739).
-			Build(),
+			WithTitle("An error occurred during update").
+			WithDescription(fmt.Sprintf("**%s**\n```%v```", context, err)).
+			WithColor(12723739),
 	},
 	); err != nil {
 		logger.Err(err).Msg("Encountered an error while sending a Discord Webhook")
@@ -58,11 +57,10 @@ func (hook *DiscordWebhook) ImageUpdated(ctx context.Context, prevImage, newImag
 
 	if _, err := hook.client.CreateEmbeds([]discord.Embed{
 		hook.getStartingEmbedBuilder().
-			SetTitle(fmt.Sprintf("%s (%s) has been updated", familiarNameTagged, shortId)).
+			WithTitle(fmt.Sprintf("%s (%s) has been updated", familiarNameTagged, shortId)).
 			AddField("Previous Digest", prevDigest, false).
 			AddField("New Digest", newDigest, false).
-			SetColor(881812).
-			Build(),
+			WithColor(881812),
 	},
 	); err != nil {
 		logger.Err(err).Msg("Encountered an error while sending a Discord Webhook")
@@ -77,10 +75,9 @@ func (hook *DiscordWebhook) ImageError(ctx context.Context, image *image.ImageDa
 
 	if _, err := hook.client.CreateEmbeds([]discord.Embed{
 		hook.getStartingEmbedBuilder().
-			SetTitle(fmt.Sprintf("%s (%s) threw an error during update", familiarNameTagged, shortId)).
-			SetDescription(fmt.Sprintf("**%s**\n```%v```", context, err)).
-			SetColor(12723739).
-			Build(),
+			WithTitle(fmt.Sprintf("%s (%s) threw an error during update", familiarNameTagged, shortId)).
+			WithDescription(fmt.Sprintf("**%s**\n```%v```", context, err)).
+			WithColor(12723739),
 	},
 	); err != nil {
 		logger.Err(err).Msg("Encountered an error while sending a Discord Webhook")
@@ -95,12 +92,11 @@ func (hook *DiscordWebhook) ImageRemovalFailed(ctx context.Context, image *image
 
 	if _, err := hook.client.CreateEmbeds([]discord.Embed{
 		hook.getStartingEmbedBuilder().
-			SetTitle(fmt.Sprintf("%s threw an error during removal", shortId)).
-			SetDescription(fmt.Sprintf("```%v```", err)).
+			WithTitle(fmt.Sprintf("%s threw an error during removal", shortId)).
+			WithDescription(fmt.Sprintf("```%v```", err)).
 			AddField("Long ID", image.ID, false).
 			AddField("Last Tag", familiarNameTagged, false).
-			SetColor(12723739).
-			Build(),
+			WithColor(12723739),
 	},
 	); err != nil {
 		logger.Err(err).Msg("Encountered an error while sending a Discord Webhook")
@@ -115,13 +111,13 @@ func (hook *DiscordWebhook) ContainerUpdated(ctx context.Context, prevContainer,
 	imageShortId := utils.ShortId(newContainer.Image.ID)
 
 	embed := hook.getStartingEmbedBuilder().
-		SetTitle(fmt.Sprintf("%s (%s) has been updated", newContainer.Name, familiarNameTagged)).
+		WithTitle(fmt.Sprintf("%s (%s) has been updated", newContainer.Name, familiarNameTagged)).
 		AddField("Container Id", containerShortId, true).
 		AddField("Image Id", imageShortId, true).
-		SetColor(2597142)
+		WithColor(2597142)
 
 	if webui, ok := newContainer.Labels["net.unraid.docker.webui"]; ok && len(webui) > 0 {
-		embed.SetURL(webui)
+		embed.WithURL(webui)
 	}
 
 	if len(warnings) > 0 {
@@ -129,13 +125,10 @@ func (hook *DiscordWebhook) ContainerUpdated(ctx context.Context, prevContainer,
 		for _, value := range warnings {
 			description += fmt.Sprintf("* %s\n", value)
 		}
-		embed.SetDescription(description)
+		embed.WithDescription(description)
 	}
 
-	if _, err := hook.client.CreateEmbeds([]discord.Embed{
-		embed.Build(),
-	},
-	); err != nil {
+	if _, err := hook.client.CreateEmbeds([]discord.Embed{embed}); err != nil {
 		logger.Err(err).Msg("Encountered an error while sending a Discord Webhook")
 	}
 }
@@ -149,31 +142,30 @@ func (hook *DiscordWebhook) ContainerError(ctx context.Context, container *conta
 
 	if _, err := hook.client.CreateEmbeds([]discord.Embed{
 		hook.getStartingEmbedBuilder().
-			SetTitle(fmt.Sprintf("%s (%s) threw an error during update", container.Name, familiarNameTagged)).
-			SetDescription(fmt.Sprintf("**%s**\n```%v```", context, err)).
+			WithTitle(fmt.Sprintf("%s (%s) threw an error during update", container.Name, familiarNameTagged)).
+			WithDescription(fmt.Sprintf("**%s**\n```%v```", context, err)).
 			AddField("Container Id", containerShortId, true).
 			AddField("Image Id", imageShortId, true).
-			SetColor(12723739).
-			Build(),
+			WithColor(12723739),
 	},
 	); err != nil {
 		logger.Err(err).Msg("Encountered an error while sending a Discord Webhook")
 	}
 }
 
-func (hook *DiscordWebhook) getStartingEmbedBuilder() *discord.EmbedBuilder {
-	builder := discord.NewEmbedBuilder()
-	builder.SetTimestamp(time.Now().UTC())
-	builder.SetFooterText("YACU by Terrails")
+func (hook *DiscordWebhook) getStartingEmbedBuilder() discord.Embed {
+	builder := discord.NewEmbed()
+	builder.WithTimestamp(time.Now().UTC())
+	builder.WithFooterText("YACU by Terrails")
 
 	if len(hook.config.Author.Name) != 0 {
-		builder.SetAuthorName(hook.config.Author.Name)
+		builder.WithAuthorName(hook.config.Author.Name)
 	}
 	if len(hook.config.Author.Url) != 0 {
-		builder.SetAuthorURL(hook.config.Author.Url)
+		builder.WithAuthorURL(hook.config.Author.Url)
 	}
 	if len(hook.config.Author.IconUrl) != 0 {
-		builder.SetAuthorIcon(hook.config.Author.IconUrl)
+		builder.WithAuthorIcon(hook.config.Author.IconUrl)
 	}
 	return builder
 }

@@ -89,7 +89,7 @@ func (c *DependantContainer) Start(ctx context.Context, client *client.Client) e
 		if err := client.ContainerStart(
 			context.Background(),
 			c.Data.ID,
-			types.ContainerStartOptions{},
+			container.StartOptions{},
 		); err != nil {
 			logger.Err(err).Msg("Failed to start container")
 			return fmt.Errorf("failed to start container %s depending on %s: %w", c.Name, c.DependsOn.Name, err)
@@ -126,7 +126,7 @@ func (c *DependantContainer) Start(ctx context.Context, client *client.Client) e
 				warning = fmt.Errorf("container %s exit code not clean: %d", c.DependsOn.Name, resp.StatusCode)
 			}
 
-			if err := client.ContainerStart(context.Background(), c.Data.ID, types.ContainerStartOptions{}); err != nil {
+			if err := client.ContainerStart(context.Background(), c.Data.ID, container.StartOptions{}); err != nil {
 				logger.Err(err).Msg("Failed to start container")
 				return fmt.Errorf("failed to start container %s depending on %s: %w", c.Name, c.DependsOn.Name, err)
 			}
@@ -148,7 +148,7 @@ func (c *DependantContainer) Start(ctx context.Context, client *client.Client) e
 				return fmt.Errorf("timed out starting container %s due to %s not starting or becoming healthy in a reasonable amount of time", c.Name, c.DependsOn.Name)
 			case <-ticker.C:
 				logger.Debug().Msg("Waiting on depending container to start or become healthy")
-				container, err_ := client.ContainerInspect(
+				cnt, err_ := client.ContainerInspect(
 					context.Background(),
 					c.DependsOn.ID,
 				)
@@ -158,14 +158,14 @@ func (c *DependantContainer) Start(ctx context.Context, client *client.Client) e
 					return fmt.Errorf("failed to start container %s due to an error from ContainerInspect: %w", c.Name, err_)
 				}
 
-				switch container.State.Health.Status {
+				switch cnt.State.Health.Status {
 				case types.NoHealthcheck, types.Healthy:
 					timer.Stop()
 					ticker.Stop()
 					if err := client.ContainerStart(
 						context.Background(),
 						c.Data.ID,
-						types.ContainerStartOptions{},
+						container.StartOptions{},
 					); err != nil {
 						logger.Err(err).Msg("Failed to start container")
 						return fmt.Errorf("failed to start container %s: %w", c.Name, err)
@@ -175,7 +175,7 @@ func (c *DependantContainer) Start(ctx context.Context, client *client.Client) e
 					timer.Stop()
 					ticker.Stop()
 					logger.Warn().Msg("failed to start container because depends_on became unhealthy")
-					return fmt.Errorf("failed to start container %s because %s became unhealthy", c.Name, container.Name)
+					return fmt.Errorf("failed to start container %s because %s became unhealthy", c.Name, cnt.Name)
 				}
 			}
 		}

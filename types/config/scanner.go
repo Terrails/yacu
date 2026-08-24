@@ -9,6 +9,7 @@ type Scanner struct {
 	ImageAge    int    `yaml:"image_age"`
 	ScanAll     bool   `yaml:"scan_all"`
 	ScanStopped bool   `yaml:"scan_stopped"`
+	FailOnError bool   `yaml:"fail_on_error"`
 }
 
 func (s Scanner) IsIntervalValid() bool {

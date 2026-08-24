@@ -174,7 +174,7 @@ func (c *Container) Start(ctx context.Context, client *client.Client) error {
 		if err := client.ContainerStart(
 			context.Background(),
 			c.ID,
-			types.ContainerStartOptions{},
+			container.StartOptions{},
 		); err != nil {
 			if i == 2 {
 				logger.Err(err).Msg("Failed to start container")
