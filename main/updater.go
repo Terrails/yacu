@@ -53,7 +53,7 @@ func (app Yacu) Run(ctx context.Context) {
 		}
 
 		if app.Scanner.FailOnError {
-			logger.Fatal().Msg("Failed to fetch updates")
+			logger.Fatal().Errs("errors", errs).Msg("Failed to fetch updates")
 			return
 		}
 	}
