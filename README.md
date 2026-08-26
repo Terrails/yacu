@@ -15,6 +15,32 @@ In case of the docker container, `yacu.yaml` should be mounted in `/data` path o
 
 File examples can be viewed in `examples/config` folder in this repository.
 
+Configuration is applied in this order: built-in defaults, the YAML file, then
+environment variables. An environment variable overrides the same setting in
+the file. Variables that are not set leave the file or default value unchanged.
+Environment variables are parsed as integers, booleans, or logging levels as
+appropriate; invalid values prevent startup. `registries` and `webhooks` are
+currently configured through YAML only.
+
+Available environment variables:
+
+```
+YACU_DATABASE_PATH
+YACU_LOGGING_CONSOLE_LEVEL
+YACU_LOGGING_FILE_DIRECTORY
+YACU_LOGGING_FILE_LEVEL
+YACU_SCANNER_INTERVAL
+YACU_SCANNER_IMAGE_AGE
+YACU_SCANNER_SCAN_ALL
+YACU_SCANNER_SCAN_STOPPED
+YACU_SCANNER_FAIL_ON_ERROR
+YACU_UPDATER_STOP_TIMEOUT
+YACU_UPDATER_REMOVE_VOLUMES
+YACU_UPDATER_REMOVE_IMAGES
+```
+
+For example, `YACU_SCANNER_IMAGE_AGE=14` overrides `scanner.image_age: 7`.
+
 ---
 ### Database
 `path` — path to sqlite database where creation and last check dates for each container are stored (default `data.db`)

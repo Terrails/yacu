@@ -19,8 +19,8 @@ func main() {
 	configPathPtr := flag.String("config", "yacu.yaml", "Path to config file. By default checks for 'yacu.yaml' in current directory.")
 	flag.Parse()
 
-	config := config.GetDefaultConfig()
-	if err := config.ReadConfigIfFound(*configPathPtr); err != nil {
+	config, err := config.LoadConfig(*configPathPtr)
+	if err != nil {
 		log.Fatal().Err(err).Msg("failed to setup configuration.")
 	}
 
@@ -73,10 +73,6 @@ func main() {
 				logger.Debug().Msg("discord webhook client initialized")
 			}
 		}
-	}
-
-	if !config.Scanner.IsIntervalValid() {
-		logger.Fatal().Str("interval", config.Scanner.Interval).Msg("invalid cron format")
 	}
 
 	logger.Info().Msg("initialization completed")
