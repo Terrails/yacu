@@ -46,7 +46,7 @@ func (app Yacu) Run(ctx context.Context) {
 	logger := zerolog.Ctx(ctx)
 
 	containers, errs := app.FetchUpdates(ctx)
-	if errs != nil {
+	if len(errs) > 0 {
 		logger.Trace().Errs("errors", errs).Msg("Failed to fetch updates")
 		for _, err := range errs {
 			app.Webhooks.Error(ctx, "Unable to fetch updates", err)
