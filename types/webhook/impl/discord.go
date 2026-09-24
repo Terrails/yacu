@@ -117,7 +117,7 @@ func (hook *DiscordWebhook) ContainerUpdated(ctx context.Context, prevContainer,
 		WithColor(2597142)
 
 	if webui, ok := newContainer.Labels["net.unraid.docker.webui"]; ok && len(webui) > 0 {
-		embed.WithURL(webui)
+		embed = embed.WithURL(webui)
 	}
 
 	if len(warnings) > 0 {
@@ -125,7 +125,7 @@ func (hook *DiscordWebhook) ContainerUpdated(ctx context.Context, prevContainer,
 		for _, value := range warnings {
 			description += fmt.Sprintf("* %s\n", value)
 		}
-		embed.WithDescription(description)
+		embed = embed.WithDescription(description)
 	}
 
 	if _, err := hook.client.CreateEmbeds([]discord.Embed{embed}); err != nil {
@@ -155,17 +155,17 @@ func (hook *DiscordWebhook) ContainerError(ctx context.Context, container *conta
 
 func (hook *DiscordWebhook) getStartingEmbedBuilder() discord.Embed {
 	builder := discord.NewEmbed()
-	builder.WithTimestamp(time.Now().UTC())
-	builder.WithFooterText("YACU by Terrails")
+	builder = builder.WithTimestamp(time.Now().UTC())
+	builder = builder.WithFooterText("YACU by Terrails")
 
 	if len(hook.config.Author.Name) != 0 {
-		builder.WithAuthorName(hook.config.Author.Name)
+		builder = builder.WithAuthorName(hook.config.Author.Name)
 	}
 	if len(hook.config.Author.Url) != 0 {
-		builder.WithAuthorURL(hook.config.Author.Url)
+		builder = builder.WithAuthorURL(hook.config.Author.Url)
 	}
 	if len(hook.config.Author.IconUrl) != 0 {
-		builder.WithAuthorIcon(hook.config.Author.IconUrl)
+		builder = builder.WithAuthorIcon(hook.config.Author.IconUrl)
 	}
 	return builder
 }
