@@ -1,0 +1,429 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/distribution/reference"
+	"github.com/docker/docker/api/types/container"
+	"github.com/opencontainers/go-digest"
+	"github.com/terrails/yacu/types/config"
+	yacucontainer "github.com/terrails/yacu/types/container"
+	"github.com/terrails/yacu/types/database"
+	yacuimage "github.com/terrails/yacu/types/image"
+	"github.com/terrails/yacu/types/webhook"
+)
+
+const (
+	oldCreated = "2026-01-01T00:00:00Z"
+	newCreated = "2026-06-01T00:00:00Z"
+)
+
+func sha(c byte) string {
+	return "sha256:" + strings.Repeat(string(c), 64)
+}
+
+func newTestApp(t *testing.T, api *fakeDocker) Yacu {
+	t.Helper()
+	db, err := database.Open(filepath.Join(t.TempDir(), "yacu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	return Yacu{
+		Client:   api,
+		Webhooks: webhook.NewWebhookHandler(),
+		DB:       *db,
+		Scanner:  config.Scanner{ImageAge: 7},
+		Updater:  config.Updater{StopTimeout: 1},
+	}
+}
+
+// loadContainer wraps a fake container the same way the scanner does
+func loadContainer(t *testing.T, app Yacu, id string) *yacucontainer.Container {
+	t.Helper()
+	data, err := app.Client.ContainerInspect(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cnt, err := yacucontainer.New(context.Background(), app.Client, &data, 1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cnt
+}
+
+func failWhen(method string, match func(id string) bool) func(string, string) error {
+	return func(m, id string) error {
+		if m == method && match(id) {
+			return errors.New("injected " + method + " failure")
+		}
+		return nil
+	}
+}
+
+func assertRunning(t *testing.T, api *fakeDocker, name, wantID string) {
+	t.Helper()
+	c := api.byName(name)
+	if c == nil {
+		t.Fatalf("container %s does not exist", name)
+	}
+	if wantID != "" && c.ID != wantID {
+		t.Fatalf("container %s has ID %s, want %s", name, c.ID, wantID)
+	}
+	if c.State.Status != container.StateRunning {
+		t.Fatalf("container %s is %s, want running", name, c.State.Status)
+	}
+}
+
+func assertUpdateError(t *testing.T, err error, wantContext string) {
+	t.Helper()
+	var updateErr *updateError
+	if !errors.As(err, &updateErr) {
+		t.Fatalf("expected an updateError, got %v", err)
+	}
+	if updateErr.Context != wantContext {
+		t.Fatalf("error context is %q, want %q", updateErr.Context, wantContext)
+	}
+	if strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("rollback reported failures: %v", err)
+	}
+}
+
+// setupApp creates a running "app" container whose tag has since moved to a new image
+func setupApp(t *testing.T) (*fakeDocker, Yacu, *yacucontainer.Container) {
+	api := newFakeDocker()
+	api.addImage("test/app:latest", sha('a'), oldCreated, "test/app@"+sha('1'))
+	id := api.addContainer("app", "test/app:latest", nil, true)
+
+	app := newTestApp(t, api)
+	cnt := loadContainer(t, app, id)
+	api.addImage("test/app:latest", sha('b'), newCreated, "test/app@"+sha('2'))
+	return api, app, cnt
+}
+
+func TestUpdateContainerReplacesContainer(t *testing.T) {
+	api, app, cnt := setupApp(t)
+
+	newCnt, warnings, err := app.UpdateContainer(context.Background(), cnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) > 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+
+	assertRunning(t, api, "app", newCnt.ID)
+	if newCnt.ID == cnt.ID {
+		t.Fatal("container was not recreated")
+	}
+	if got := api.byName("app").Image; got != sha('b') {
+		t.Fatalf("recreated container uses image %s, want %s", got, sha('b'))
+	}
+	if len(api.containers) != 1 {
+		t.Fatalf("expected the previous container to be removed, have %d containers", len(api.containers))
+	}
+}
+
+func TestUpdateContainerKeepsStoppedContainerStopped(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/app:latest", sha('a'), oldCreated, "test/app@"+sha('1'))
+	id := api.addContainer("app", "test/app:latest", nil, false)
+	app := newTestApp(t, api)
+	cnt := loadContainer(t, app, id)
+
+	newCnt, _, err := app.UpdateContainer(context.Background(), cnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.called("ContainerStart", newCnt.ID) != 0 {
+		t.Fatal("stopped container was started")
+	}
+	if len(api.containers) != 1 {
+		t.Fatalf("expected one container, have %d", len(api.containers))
+	}
+}
+
+func TestUpdateContainerRollsBackWhenCreateFails(t *testing.T) {
+	api, app, cnt := setupApp(t)
+	api.fail = failWhen("ContainerCreate", func(string) bool { return true })
+
+	_, _, err := app.UpdateContainer(context.Background(), cnt)
+
+	assertUpdateError(t, err, "Unable to create container")
+	assertRunning(t, api, "app", cnt.ID)
+	if len(api.containers) != 1 {
+		t.Fatalf("expected only the original container, have %d", len(api.containers))
+	}
+}
+
+func TestUpdateContainerRollsBackWhenStartFails(t *testing.T) {
+	api, app, cnt := setupApp(t)
+	api.fail = failWhen("ContainerStart", func(id string) bool { return id != cnt.ID })
+
+	_, _, err := app.UpdateContainer(context.Background(), cnt)
+
+	assertUpdateError(t, err, "Unable to start container")
+	assertRunning(t, api, "app", cnt.ID)
+	if len(api.containers) != 1 {
+		t.Fatalf("expected the replacement to be removed, have %d containers", len(api.containers))
+	}
+}
+
+func TestUpdateContainerRollsBackWhenNameIsTaken(t *testing.T) {
+	api, app, cnt := setupApp(t)
+	// leftover from an interrupted update
+	api.addContainer("app"+oldContainerSuffix, "test/app:latest", nil, false)
+
+	_, _, err := app.UpdateContainer(context.Background(), cnt)
+
+	assertUpdateError(t, err, "Unable to rename container")
+	assertRunning(t, api, "app", cnt.ID)
+}
+
+// setupCompose creates a compose project "p" with a "db" service and services depending on it
+func setupCompose(t *testing.T) (*fakeDocker, Yacu, *yacucontainer.Container, map[string]string) {
+	api := newFakeDocker()
+	api.addImage("test/db:latest", sha('a'), oldCreated, "test/db@"+sha('1'))
+
+	compose := func(project, service, dependsOn string) map[string]string {
+		labels := map[string]string{
+			yacucontainer.LABEL_PROJECT: project,
+			yacucontainer.LABEL_SERVICE: service,
+		}
+		if len(dependsOn) > 0 {
+			labels[yacucontainer.LABEL_DEPENDS_ON] = dependsOn
+		}
+		return labels
+	}
+
+	ids := map[string]string{
+		"db":    api.addContainer("p-db-1", "test/db:latest", compose("p", "db", ""), true),
+		"web":   api.addContainer("p-web-1", "test/web:latest", compose("p", "web", "cache:service_started:true,db:service_started:true"), true),
+		"lazy":  api.addContainer("p-lazy-1", "test/web:latest", compose("p", "lazy", "db:service_started:false"), true),
+		"other": api.addContainer("q-web-1", "test/web:latest", compose("q", "web", "db:service_started:true"), true),
+	}
+
+	app := newTestApp(t, api)
+	cnt := loadContainer(t, app, ids["db"])
+	api.addImage("test/db:latest", sha('b'), newCreated, "test/db@"+sha('2'))
+	return api, app, cnt, ids
+}
+
+func TestUpdateContainerRestartsDependants(t *testing.T) {
+	api, app, cnt, ids := setupCompose(t)
+
+	newCnt, warnings, err := app.UpdateContainer(context.Background(), cnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) > 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+
+	assertRunning(t, api, "p-db-1", newCnt.ID)
+	if api.called("ContainerStop", ids["web"]) != 1 || api.called("ContainerStart", ids["web"]) != 1 {
+		t.Fatal("dependant was not stopped and started again")
+	}
+	assertRunning(t, api, "p-web-1", ids["web"])
+
+	if api.called("ContainerStop", ids["lazy"]) != 0 {
+		t.Fatal("dependant with restart: false was stopped")
+	}
+	if api.called("ContainerStop", ids["other"]) != 0 {
+		t.Fatal("service from another compose project was stopped")
+	}
+}
+
+func TestUpdateContainerRestartsDependantsWhenStopFails(t *testing.T) {
+	api, app, cnt, ids := setupCompose(t)
+	api.fail = failWhen("ContainerStop", func(id string) bool { return id == ids["db"] })
+
+	_, _, err := app.UpdateContainer(context.Background(), cnt)
+
+	assertUpdateError(t, err, "Unable to stop container")
+	assertRunning(t, api, "p-db-1", ids["db"])
+	assertRunning(t, api, "p-web-1", ids["web"])
+}
+
+func TestUpdateContainerRestartsDependantsWhenCreateFails(t *testing.T) {
+	api, app, cnt, ids := setupCompose(t)
+	api.fail = failWhen("ContainerCreate", func(string) bool { return true })
+
+	_, _, err := app.UpdateContainer(context.Background(), cnt)
+
+	assertUpdateError(t, err, "Unable to create container")
+	assertRunning(t, api, "p-db-1", ids["db"])
+	assertRunning(t, api, "p-web-1", ids["web"])
+}
+
+func TestGetDependingContainersMatchesContainerNameOutsideCompose(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/db:latest", sha('a'), oldCreated, "test/db@"+sha('1'))
+	dbID := api.addContainer("db", "test/db:latest", nil, true)
+	webID := api.addContainer("web", "test/web:latest", map[string]string{yacucontainer.LABEL_DEPENDS_ON: "db"}, true)
+	app := newTestApp(t, api)
+
+	data, _ := api.ContainerInspect(context.Background(), dbID)
+	dependants, err := app.GetDependingContainers(context.Background(), &data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dependants) != 1 || dependants[0].Data.ID != webID {
+		t.Fatalf("expected web to depend on db, got %d dependants", len(dependants))
+	}
+	if dependants[0].DependencyType != yacucontainer.DEPENDENCY_HEALTHY {
+		t.Fatalf("expected default condition %s, got %s", yacucontainer.DEPENDENCY_HEALTHY, dependants[0].DependencyType)
+	}
+}
+
+func TestPullImageReportsErrorsFromStream(t *testing.T) {
+	api := newFakeDocker()
+	app := newTestApp(t, api)
+	named, _ := reference.ParseNormalizedNamed("test/app:latest")
+	tagged := named.(reference.NamedTagged)
+
+	if err := app.PullImage(context.Background(), tagged); err != nil {
+		t.Fatalf("successful pull returned %v", err)
+	}
+
+	api.pullError("test/app:latest", "manifest unknown")
+	err := app.PullImage(context.Background(), tagged)
+	if err == nil || !strings.Contains(err.Error(), "manifest unknown") {
+		t.Fatalf("expected the stream error to be returned, got %v", err)
+	}
+}
+
+func TestApplyUpdatesSkipsOnlyContainersWhoseImageFailed(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/a:latest", sha('a'), oldCreated, "test/a@"+sha('1'))
+	api.addImage("test/b:latest", sha('b'), oldCreated, "test/b@"+sha('2'))
+	aID := api.addContainer("a", "test/a:latest", nil, true)
+	bID := api.addContainer("b", "test/b:latest", nil, true)
+	app := newTestApp(t, api)
+
+	// what the scanner recorded about the newer remote images
+	created, _ := time.Parse(time.RFC3339, newCreated)
+	for _, name := range []string{"test/a:latest", "test/b:latest"} {
+		if _, err := app.DB.SaveRemoteImage(name, "docker.io", created, digest.Digest(sha('9'))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	api.pullError("test/a:latest", "unauthorized")
+	api.addUntaggedImage(sha('c'), newCreated, "test/b@"+sha('9'))
+	api.pullResult("test/b:latest", sha('c'))
+
+	containers := yacucontainer.Containers{loadContainer(t, app, aID), loadContainer(t, app, bID)}
+	app.ApplyUpdates(context.Background(), containers)
+
+	assertRunning(t, api, "a", aID)
+	b := api.byName("b")
+	if b == nil || b.ID == bID || b.Image != sha('c') {
+		t.Fatal("container b was not updated after container a's image failed to pull")
+	}
+}
+
+func TestFetchUpdatesFiltersBeforeInspecting(t *testing.T) {
+	api := newFakeDocker()
+	enabled := map[string]string{yacucontainer.LABEL_ENABLE: "true"}
+	api.addImage("test/plain:latest", sha('a'), oldCreated, "test/plain@"+sha('1'))
+	api.addImage("local/build:latest", sha('b'), oldCreated, "")
+	api.addImage("test/pinned:1@"+sha('3'), sha('c'), oldCreated, "test/pinned@"+sha('3'))
+	api.addImage("ghcr.io/terrails/yacu:latest", sha('d'), oldCreated, "ghcr.io/terrails/yacu@"+sha('4'))
+
+	ids := map[string]string{
+		"plain":   api.addContainer("plain", "test/plain:latest", nil, true),
+		"stopped": api.addContainer("stopped", "local/build:latest", enabled, false),
+		"local":   api.addContainer("local", "local/build:latest", enabled, true),
+		"pinned":  api.addContainer("pinned", "test/pinned:1@"+sha('3'), enabled, true),
+		"self":    api.addContainer("yacu", "ghcr.io/terrails/yacu:latest", enabled, true),
+	}
+	app := newTestApp(t, api)
+
+	containers, errs := app.FetchUpdates(context.Background())
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(containers) > 0 {
+		t.Fatalf("expected no updatable containers, got %d", len(containers))
+	}
+
+	for name, want := range map[string]int{"plain": 0, "stopped": 0, "local": 1, "pinned": 1, "self": 1} {
+		if got := api.called("ContainerInspect", ids[name]); got != want {
+			t.Errorf("container %s inspected %d times, want %d", name, got, want)
+		}
+	}
+
+	app.Scanner.ScanStopped = true
+	if _, errs := app.FetchUpdates(context.Background()); len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if api.called("ContainerInspect", ids["stopped"]) != 1 {
+		t.Error("stopped container was not scanned with scan_stopped enabled")
+	}
+}
+
+func TestFetchUpdatesRetriesFailedChecks(t *testing.T) {
+	previousDelay := scanRetryDelay
+	scanRetryDelay = 0
+	t.Cleanup(func() { scanRetryDelay = previousDelay })
+
+	api := newFakeDocker()
+	api.addImage("local/build:latest", sha('b'), oldCreated, "")
+	id := api.addContainer("local", "local/build:latest", map[string]string{yacucontainer.LABEL_ENABLE: "true"}, true)
+	app := newTestApp(t, api)
+
+	failures := 2
+	api.fail = func(method, _ string) error {
+		if method == "ContainerInspect" && failures > 0 {
+			failures--
+			return errors.New("daemon busy")
+		}
+		return nil
+	}
+
+	if _, errs := app.FetchUpdates(context.Background()); len(errs) > 0 {
+		t.Fatalf("expected the third attempt to succeed, got %v", errs)
+	}
+	if got := api.called("ContainerInspect", id); got != 3 {
+		t.Fatalf("container inspected %d times, want 3", got)
+	}
+
+	api.calls = nil
+	api.fail = failWhen("ContainerInspect", func(string) bool { return true })
+	if _, errs := app.FetchUpdates(context.Background()); len(errs) != 1 {
+		t.Fatalf("expected one error after exhausting retries, got %v", errs)
+	}
+	if got := api.called("ContainerInspect", id); got != scanAttempts {
+		t.Fatalf("container inspected %d times, want %d", got, scanAttempts)
+	}
+}
+
+func TestRemoveUnusedImagesKeepsImagesOfStoppedContainers(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/a:latest", sha('a'), oldCreated, "test/a@"+sha('1'))
+	api.addUntaggedImage(sha('b'), oldCreated, "test/a@"+sha('2'))
+	api.addContainer("idle", "test/a:latest", nil, false)
+	app := newTestApp(t, api)
+
+	count := app.RemoveUnusedImages(context.Background(),
+		&yacuimage.ImageData{ID: sha('a')},
+		&yacuimage.ImageData{ID: sha('b')},
+	)
+
+	if count != 1 {
+		t.Fatalf("removed %d images, want 1", count)
+	}
+	if _, ok := api.images[sha('a')]; !ok {
+		t.Fatal("image used by a stopped container was removed")
+	}
+	if _, ok := api.images[sha('b')]; ok {
+		t.Fatal("unused image was not removed")
+	}
+}

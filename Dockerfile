@@ -10,6 +10,8 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
+	CGO_ENABLED=1 GOOS=linux go test ./...
+RUN --mount=type=cache,target=/root/.cache/go-build \
 	CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/yacu ./main
 
 FROM alpine:3.22
