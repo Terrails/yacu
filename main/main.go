@@ -39,8 +39,9 @@ func main() {
 
 	database, err := config.Database.LoadDatabase(ctx)
 	if err != nil {
-		logger.Fatal().Msg("loading local database failed")
+		logger.Fatal().Err(err).Msg("loading local database failed")
 	}
+	defer database.Close()
 	logger.Debug().Msg("local database initialized")
 
 	yacu := Yacu{
