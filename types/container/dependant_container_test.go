@@ -23,8 +23,17 @@ func (s *stubAPI) ContainerInspect(ctx context.Context, containerID string) (con
 }
 
 func (s *stubAPI) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
+	// like the real client, a call made with a cancelled context fails
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.started = append(s.started, containerID)
 	return nil
+}
+
+// the dependency never exits
+func (s *stubAPI) ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	return make(chan container.WaitResponse), make(chan error)
 }
 
 func fastPolling(t *testing.T) {
@@ -71,5 +80,33 @@ func TestDependantIsNotStartedWhenDependencyIsUnhealthy(t *testing.T) {
 	}
 	if len(api.started) != 0 {
 		t.Fatalf("expected nothing to be started, started %v", api.started)
+	}
+}
+
+func TestDependantIsLeftStoppedOnShutdown(t *testing.T) {
+	// the dependency never becomes healthy or exits within the test
+	for _, dependencyType := range []DependencyType{DEPENDENCY_HEALTHY, DEPENDENCY_COMPLETED} {
+		t.Run(string(dependencyType), func(t *testing.T) {
+			api := newStub(&container.Health{Status: container.Starting})
+			dependant := NewDependant(&container.Summary{ID: "web", Names: []string{"/web"}}, 1, "db", dependencyType)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(50*time.Millisecond, cancel)
+
+			done := make(chan error)
+			go func() { done <- dependant.Start(ctx, api, "new-db") }()
+
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("expected a warning that web was left stopped")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("waiting on the dependency was not interrupted by shutdown")
+			}
+			if len(api.started) != 0 {
+				t.Fatalf("expected web to stay stopped on shutdown, started %v", api.started)
+			}
+		})
 	}
 }

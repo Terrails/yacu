@@ -23,8 +23,14 @@ type ImageData struct {
 	OS      string
 }
 
+// how long a single lookup of an image in its registry may take
+const lookupTimeout = 2 * time.Minute
+
 func GetImageDataFromRegistry(ctx context.Context, entries *config.RegistryEntries, named reference.Named) (*ImageData, error) {
 	logger := zerolog.Ctx(ctx)
+
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
 
 	ref, err := docker.NewReference(named)
 	if err != nil {
@@ -35,26 +41,26 @@ func GetImageDataFromRegistry(ctx context.Context, entries *config.RegistryEntri
 	domain := reference.Domain(named)
 	sysCtx := entries.GetSystemContextFor(domain)
 
-	src, err := ref.NewImageSource(context.Background(), sysCtx)
+	src, err := ref.NewImageSource(ctx, sysCtx)
 	if err != nil {
 		logger.Err(err).Msg("fetching image source failed")
 		return nil, fmt.Errorf("fetching image source failed: %w", err)
 	}
 	defer src.Close()
 
-	img, err := image.FromUnparsedImage(context.Background(), sysCtx, image.UnparsedInstance(src, nil))
+	img, err := image.FromUnparsedImage(ctx, sysCtx, image.UnparsedInstance(src, nil))
 	if err != nil {
 		logger.Err(err).Msg("fetching image failed")
 		return nil, fmt.Errorf("fetching image failed: %w", err)
 	}
 
-	imgData, err := img.Inspect(context.Background())
+	imgData, err := img.Inspect(ctx)
 	if err != nil {
 		logger.Err(err).Msg("image inspect call failed")
 		return nil, fmt.Errorf("image inspect call failed: %w", err)
 	}
 
-	rawManifest, _, err := src.GetManifest(context.Background(), nil)
+	rawManifest, _, err := src.GetManifest(ctx, nil)
 	if err != nil {
 		logger.Err(err).Msg("fetching image manifest failed")
 		return nil, fmt.Errorf("fetching image manifest failed: %w", err)

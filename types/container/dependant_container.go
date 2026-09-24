@@ -41,7 +41,9 @@ func (c DependantContainers) Stop(ctx context.Context, api docker.API) []string 
 
 // Starts every dependant once the container it depends on (identified by
 // dependencyID, which changes when that container is recreated) satisfies the
-// dependency condition.
+// dependency condition. If ctx is cancelled (shutdown), waiting on the condition
+// is abandoned and the dependants waiting on it are left stopped, as starting them
+// before their dependency is ready could do more harm than leaving them off.
 func (c DependantContainers) Start(ctx context.Context, api docker.API, dependencyID string) []string {
 	warnings := []string{}
 	for _, container := range c {
@@ -85,28 +87,41 @@ func (c *DependantContainer) Start(ctx context.Context, api docker.API, dependen
 	logger := c.logger(ctx)
 	logger.Debug().Msg("Attempting to start container")
 
-	switch c.DependencyType {
-	case DEPENDENCY_STARTED:
-		if err := api.ContainerStart(ctx, c.Data.ID, container.StartOptions{}); err != nil {
+	// only the waiting is cut short by shutdown, a start that is due must still happen
+	callCtx := context.WithoutCancel(ctx)
+	start := func() error {
+		if err := api.ContainerStart(callCtx, c.Data.ID, container.StartOptions{}); err != nil {
 			logger.Err(err).Msg("Failed to start container")
 			return fmt.Errorf("failed to start container %s depending on %s: %w", c.Name, c.DependsOnName, err)
 		}
+		return nil
+	}
+	leaveStoppedOnShutdown := func() error {
+		logger.Warn().Msg("Shutting down, leaving container stopped as depends_on is not satisfied yet")
+		return fmt.Errorf("container %s left stopped due to shutdown before %s satisfied %s", c.Name, c.DependsOnName, c.DependencyType)
+	}
+
+	switch c.DependencyType {
+	case DEPENDENCY_STARTED:
+		return start()
 	case DEPENDENCY_COMPLETED:
-		respCh, errCh := api.ContainerWait(ctx, dependencyID, container.WaitConditionNotRunning)
+		waitCtx, cancelWait := context.WithCancel(callCtx)
+		defer cancelWait()
+		respCh, errCh := api.ContainerWait(waitCtx, dependencyID, container.WaitConditionNotRunning)
 
 		// Better to limit it to not keep the app waiting
 		timer := time.NewTimer(dependencyTimeout)
+		defer timer.Stop()
 		select {
+		case <-ctx.Done():
+			return leaveStoppedOnShutdown()
 		case <-timer.C:
 			logger.Warn().Msg("Timed out starting container due to depends_on not exitting in a reasonable amount of time")
 			return fmt.Errorf("timed out starting container %s due to %s not exitting in a reasonable amount of time", c.Name, c.DependsOnName)
 		case err := <-errCh:
-			timer.Stop()
 			logger.Err(err).Msg("An error occurred while sending or receiving a ContainerWait request")
 			return fmt.Errorf("an error occurred while sending or receiving a ContainerWait request for %s: %w", c.DependsOnName, err)
 		case resp := <-respCh:
-			timer.Stop()
-
 			if resp.Error != nil {
 				err := errors.New(resp.Error.Message)
 				logger.Err(err).Msg("Received an error from ContainerWait request")
@@ -119,11 +134,9 @@ func (c *DependantContainer) Start(ctx context.Context, api docker.API, dependen
 				warning = fmt.Errorf("container %s exit code not clean: %d", c.DependsOnName, resp.StatusCode)
 			}
 
-			if err := api.ContainerStart(ctx, c.Data.ID, container.StartOptions{}); err != nil {
-				logger.Err(err).Msg("Failed to start container")
-				return fmt.Errorf("failed to start container %s depending on %s: %w", c.Name, c.DependsOnName, err)
+			if err := start(); err != nil {
+				return err
 			}
-
 			return warning
 		}
 
@@ -137,15 +150,14 @@ func (c *DependantContainer) Start(ctx context.Context, api docker.API, dependen
 
 		for {
 			select {
+			case <-ctx.Done():
+				return leaveStoppedOnShutdown()
 			case <-timer.C:
 				logger.Warn().Msg("Timed out starting container due to depends_on not starting or becoming healthy in a reasonable amount of time.")
 				return fmt.Errorf("timed out starting container %s due to %s not starting or becoming healthy in a reasonable amount of time", c.Name, c.DependsOnName)
 			case <-ticker.C:
 				logger.Debug().Msg("Waiting on depending container to start or become healthy")
-				cnt, err_ := api.ContainerInspect(
-					ctx,
-					dependencyID,
-				)
+				cnt, err_ := api.ContainerInspect(callCtx, dependencyID)
 
 				if err_ != nil {
 					logger.Err(err_).Msg("Failed to start container due to an error from ContainerInspect")
@@ -160,15 +172,7 @@ func (c *DependantContainer) Start(ctx context.Context, api docker.API, dependen
 
 				switch health {
 				case container.NoHealthcheck, container.Healthy:
-					if err := api.ContainerStart(
-						ctx,
-						c.Data.ID,
-						container.StartOptions{},
-					); err != nil {
-						logger.Err(err).Msg("Failed to start container")
-						return fmt.Errorf("failed to start container %s: %w", c.Name, err)
-					}
-					return nil
+					return start()
 				case container.Unhealthy:
 					logger.Warn().Msg("failed to start container because depends_on became unhealthy")
 					return fmt.Errorf("failed to start container %s because %s became unhealthy", c.Name, cnt.Name)
@@ -176,7 +180,6 @@ func (c *DependantContainer) Start(ctx context.Context, api docker.API, dependen
 			}
 		}
 	}
-	return nil
 }
 
 func (c *DependantContainer) logger(ctx context.Context) *zerolog.Logger {

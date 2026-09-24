@@ -4,16 +4,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/adhocore/gronx"
 	"github.com/docker/docker/client"
 	"github.com/rs/zerolog/log"
 	"github.com/terrails/yacu/types/config"
+	"github.com/terrails/yacu/types/docker"
 	"github.com/terrails/yacu/types/webhook"
 	webhooks "github.com/terrails/yacu/types/webhook/impl"
 	"github.com/terrails/yacu/utils"
 )
+
+// how long a single Docker Engine API call may take
+const dockerCallTimeout = 2 * time.Minute
 
 func main() {
 	configPathPtr := flag.String("config", "yacu.yaml", "Path to config file. By default checks for 'yacu.yaml' in current directory.")
@@ -27,14 +34,22 @@ func main() {
 	logger := config.Logging.CreateLogger()
 	logger.Debug().Msg("logger initialized")
 
-	ctx := logger.WithContext(context.Background())
+	// cancelled on SIGINT/SIGTERM, a second signal terminates immediately
+	ctx, stop := signal.NotifyContext(logger.WithContext(context.Background()), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	shutdownLogged := make(chan struct{})
+	context.AfterFunc(ctx, func() {
+		stop()
+		logger.Info().Msg("shutdown requested, finishing any container update in progress. Send the signal again to exit immediately")
+		close(shutdownLogged)
+	})
 
 	client, err := client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("creating local docker engine client failed")
 	}
 	// set the API version to one server has
-	client.NegotiateAPIVersion(context.Background())
+	client.NegotiateAPIVersion(ctx)
 	logger.Debug().Msg("docker engine client initialized")
 
 	database, err := config.Database.LoadDatabase(ctx)
@@ -45,7 +60,7 @@ func main() {
 	logger.Debug().Msg("local database initialized")
 
 	yacu := Yacu{
-		Client:     client,
+		Client:     docker.WithTimeouts(client, dockerCallTimeout),
 		Webhooks:   webhook.NewWebhookHandler(),
 		DB:         *database,
 		Scanner:    config.Scanner,
@@ -83,7 +98,9 @@ func main() {
 
 		if err != nil {
 			logger.Err(err).Msg("unknown error while calculating next run time")
-			time.Sleep(time.Second * 3)
+			if utils.Sleep(ctx, time.Second*3) != nil {
+				break
+			}
 			continue
 		}
 
@@ -92,8 +109,14 @@ func main() {
 
 		logger.Info().Msg(fmt.Sprintf("next run time in %s.", humanized))
 
-		time.Sleep(timeRemaining)
+		if utils.Sleep(ctx, timeRemaining) != nil {
+			break
+		}
 
 		yacu.Run(ctx)
 	}
+
+	// the loop only ends once shutdown was requested
+	<-shutdownLogged
+	logger.Info().Msg("shut down")
 }

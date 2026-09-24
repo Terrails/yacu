@@ -41,6 +41,9 @@ const scanAttempts = 3
 
 var scanRetryDelay = time.Second * 2
 
+// how long pulling a single image may take
+const pullTimeout = 30 * time.Minute
+
 type Yacu struct {
 	Client   docker.API
 	Webhooks *webhook.Webhooks
@@ -51,7 +54,7 @@ type Yacu struct {
 	Registries config.RegistryEntries
 }
 
-// updateError is a failed container update. Context names the step that failed.
+// A failed step of an image or container update. Context names the step that failed.
 type updateError struct {
 	Context string
 	Err     error
@@ -64,6 +67,12 @@ func (app Yacu) Run(ctx context.Context) {
 	logger := zerolog.Ctx(ctx)
 
 	containers, errs := app.FetchUpdates(ctx)
+	if ctx.Err() != nil {
+		// errors caused by the interruption are not worth reporting
+		logger.Info().Msg("Shutting down, scan interrupted")
+		return
+	}
+
 	if len(errs) > 0 {
 		logger.Warn().Errs("errors", errs).Msg("Failed to fetch some updates")
 		for _, err := range errs {
@@ -91,6 +100,7 @@ func (app Yacu) Run(ctx context.Context) {
 
 // Pulls the new images and recreates the given containers.
 // A container is skipped when its image could not be pulled.
+// On shutdown (ctx cancelled) an update in progress is completed, the remaining ones are skipped.
 func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Containers) {
 	logger := zerolog.Ctx(ctx)
 
@@ -99,7 +109,12 @@ func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Conta
 	successCount := 0
 	imgToRemove := set.NewImageSet()
 
-	for _, cnt := range containers {
+	for i, cnt := range containers {
+		if ctx.Err() != nil {
+			logger.Warn().Int("skipped", len(containers)-i).Msg("Shutting down, skipping remaining container updates")
+			break
+		}
+
 		containerLogger := logger.With().Str("service", "container_update").Str("container", cnt.Name).Str("image", cnt.RepositoryFamiliarized()).Logger()
 		containerCtx := containerLogger.WithContext(ctx)
 
@@ -130,7 +145,7 @@ func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Conta
 
 	logger.Info().Int("total", len(containers)).Int("successful", successCount).Msg("Container updates completed")
 
-	if app.Updater.RemoveImages && len(imgToRemove.Items) > 0 {
+	if app.Updater.RemoveImages && len(imgToRemove.Items) > 0 && ctx.Err() == nil {
 		logger.Debug().Int("count", len(imgToRemove.Items)).Msg("Removing unused images")
 		count := app.RemoveUnusedImages(ctx, maps.Values(imgToRemove.Items)...)
 		logger.Info().Int("count", count).Msg("Removed unused images")
@@ -152,23 +167,31 @@ func (app Yacu) PullImages(ctx context.Context, containers yacucontainer.Contain
 		}
 		handled[repository] = true
 
+		if ctx.Err() != nil {
+			failed[repository] = ctx.Err()
+			continue
+		}
+
 		imageLogger := logger.With().Str("service", "image_pull").Str("image", cnt.RepositoryFamiliarized()).Logger()
 		imageCtx := imageLogger.WithContext(ctx)
 
 		if err := app.pullNewImage(imageCtx, cnt); err != nil {
-			failed[repository] = err
+			failed[repository] = err.Err
+			// a pull cut short by shutdown is not worth reporting
+			if ctx.Err() == nil {
+				app.Webhooks.ImageError(imageCtx, cnt.Image, err.Context, err.Err)
+			}
 		}
 	}
 	return failed
 }
 
-func (app Yacu) pullNewImage(ctx context.Context, cnt *yacucontainer.Container) error {
+func (app Yacu) pullNewImage(ctx context.Context, cnt *yacucontainer.Container) *updateError {
 	logger := zerolog.Ctx(ctx)
 
 	// the image may already be present, e.g. pulled manually since the scan
 	if yes, err := app.IsLatestImagePresent(ctx, cnt.Repository); err != nil {
-		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to check if image is latest", err)
-		return err
+		return &updateError{Context: "Unable to check if image is latest", Err: err}
 	} else if yes {
 		return nil
 	}
@@ -176,21 +199,18 @@ func (app Yacu) pullNewImage(ctx context.Context, cnt *yacucontainer.Container) 
 	logger.Debug().Msg("Pulling image")
 
 	if err := app.PullImage(ctx, cnt.Repository); err != nil {
-		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to pull image", err)
-		return err
+		return &updateError{Context: "Unable to pull image", Err: err}
 	}
 
 	newImageRaw, err := app.Client.ImageInspect(ctx, cnt.Repository.String())
 	if err != nil {
 		logger.Err(err).Msg("ImageInspect request failed")
-		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to inspect image", err)
-		return err
+		return &updateError{Context: "Unable to inspect image", Err: err}
 	}
 
 	newImageData, err := yacuimage.NewData(&newImageRaw, cnt.Repository)
 	if err != nil {
-		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to initialize image", err)
-		return err
+		return &updateError{Context: "Unable to initialize image", Err: err}
 	}
 
 	logger.Info().Msg("Pulled image")
@@ -204,8 +224,15 @@ func (app Yacu) pullNewImage(ctx context.Context, cnt *yacucontainer.Container) 
 // been created and started, so that any failure can be rolled back: the
 // replacement is removed, the old container gets its name back and it (and
 // any stopped dependants) is started again.
+//
+// Once started, an update is not interrupted by shutdown (ctx cancelled) so
+// that it always ends committed or rolled back. Only waiting on the conditions
+// of dependants is cut short, those still waiting are left stopped.
 func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Container) (*yacucontainer.Container, []string, error) {
 	logger := zerolog.Ctx(ctx)
+
+	shutdownCtx := ctx
+	ctx = context.WithoutCancel(ctx)
 
 	warnings := []string{}
 	shouldRestart := cnt.IsRunning()
@@ -225,7 +252,7 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 			if startErr := cnt.Start(ctx, app.Client); startErr != nil {
 				rollbackErrs = append(rollbackErrs, startErr)
 			} else {
-				for _, warning := range dependantContainers.Start(ctx, app.Client, cnt.ID) {
+				for _, warning := range dependantContainers.Start(shutdownCtx, app.Client, cnt.ID) {
 					rollbackErrs = append(rollbackErrs, errors.New(warning))
 				}
 			}
@@ -359,7 +386,7 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 	}
 
 	if shouldRestart {
-		startWarnings := dependantContainers.Start(ctx, app.Client, newId)
+		startWarnings := dependantContainers.Start(shutdownCtx, app.Client, newId)
 		if len(startWarnings) > 0 {
 			warnings = append(warnings, startWarnings...)
 			logger.Warn().Strs("warnings", startWarnings).Msg("Received warnings while starting depending containers")
@@ -386,6 +413,9 @@ func (app Yacu) FetchUpdates(ctx context.Context) (yacucontainer.Containers, []e
 	var updateErrors []error = []error{}
 
 	for i := range cntList {
+		if ctx.Err() != nil {
+			break
+		}
 		summary := &cntList[i]
 
 		if !yacucontainer.ShouldScan(summary, app.Scanner.ScanAll, app.Scanner.ScanStopped) {
@@ -414,7 +444,9 @@ func (app Yacu) checkContainerWithRetry(ctx context.Context, summary *container.
 
 		logger.Debug().Err(err).Str("container", summary.ID).Int("attempt", attempt).Msg("Failed to check if container is updateable")
 		if attempt < scanAttempts {
-			time.Sleep(scanRetryDelay * time.Duration(attempt))
+			if utils.Sleep(ctx, scanRetryDelay*time.Duration(attempt)) != nil {
+				break
+			}
 		}
 	}
 
@@ -610,6 +642,9 @@ type pullMessage struct {
 
 func (app Yacu) PullImage(ctx context.Context, repository reference.NamedTagged) error {
 	logger := zerolog.Ctx(ctx)
+
+	ctx, cancel := context.WithTimeout(ctx, pullTimeout)
+	defer cancel()
 
 	pullOptions := image.PullOptions{}
 	if authEntry := app.Registries.GetAuthConfigFor(reference.Domain(repository)); authEntry != nil {

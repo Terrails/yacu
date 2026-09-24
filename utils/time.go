@@ -1,10 +1,24 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 )
+
+// Waits for d to pass, returning early with the context's error if ctx is cancelled first.
+func Sleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 func DaysPassed(t time.Time) int {
 	diff := time.Now().UTC().Sub(t)

@@ -123,12 +123,15 @@ func (f *fakeDocker) called(method, id string) int {
 	return count
 }
 
-func (f *fakeDocker) record(method, id string) error {
+// like the real client, a call made with a cancelled context fails
+func (f *fakeDocker) record(ctx context.Context, method, id string) error {
 	f.calls = append(f.calls, method+" "+id)
 	if f.fail != nil {
-		return f.fail(method, id)
+		if err := f.fail(method, id); err != nil {
+			return err
+		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (f *fakeDocker) lookup(idOrName string) (*container.InspectResponse, error) {
@@ -144,7 +147,7 @@ func (f *fakeDocker) lookup(idOrName string) (*container.InspectResponse, error)
 func (f *fakeDocker) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerList", ""); err != nil {
+	if err := f.record(ctx, "ContainerList", ""); err != nil {
 		return nil, err
 	}
 
@@ -182,7 +185,7 @@ func (f *fakeDocker) ContainerList(ctx context.Context, options container.ListOp
 func (f *fakeDocker) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerInspect", containerID); err != nil {
+	if err := f.record(ctx, "ContainerInspect", containerID); err != nil {
 		return container.InspectResponse{}, err
 	}
 
@@ -199,7 +202,7 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, containerID string) (
 func (f *fakeDocker) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerStop", containerID); err != nil {
+	if err := f.record(ctx, "ContainerStop", containerID); err != nil {
 		return err
 	}
 
@@ -214,7 +217,7 @@ func (f *fakeDocker) ContainerStop(ctx context.Context, containerID string, opti
 func (f *fakeDocker) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerStart", containerID); err != nil {
+	if err := f.record(ctx, "ContainerStart", containerID); err != nil {
 		return err
 	}
 
@@ -229,7 +232,7 @@ func (f *fakeDocker) ContainerStart(ctx context.Context, containerID string, opt
 func (f *fakeDocker) ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerRemove", containerID); err != nil {
+	if err := f.record(ctx, "ContainerRemove", containerID); err != nil {
 		return err
 	}
 
@@ -244,7 +247,7 @@ func (f *fakeDocker) ContainerRemove(ctx context.Context, containerID string, op
 func (f *fakeDocker) ContainerRename(ctx context.Context, containerID, newContainerName string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerRename", containerID); err != nil {
+	if err := f.record(ctx, "ContainerRename", containerID); err != nil {
 		return err
 	}
 
@@ -262,7 +265,7 @@ func (f *fakeDocker) ContainerRename(ctx context.Context, containerID, newContai
 func (f *fakeDocker) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ContainerCreate", containerName); err != nil {
+	if err := f.record(ctx, "ContainerCreate", containerName); err != nil {
 		return container.CreateResponse{}, err
 	}
 
@@ -298,7 +301,7 @@ func (f *fakeDocker) ContainerWait(ctx context.Context, containerID string, cond
 func (f *fakeDocker) NetworkConnect(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("NetworkConnect", containerID); err != nil {
+	if err := f.record(ctx, "NetworkConnect", containerID); err != nil {
 		return err
 	}
 
@@ -316,7 +319,7 @@ func (f *fakeDocker) NetworkConnect(ctx context.Context, networkID, containerID 
 func (f *fakeDocker) ImagePull(ctx context.Context, refStr string, options image.PullOptions) (io.ReadCloser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ImagePull", refStr); err != nil {
+	if err := f.record(ctx, "ImagePull", refStr); err != nil {
 		return nil, err
 	}
 
@@ -334,7 +337,7 @@ func (f *fakeDocker) ImagePull(ctx context.Context, refStr string, options image
 func (f *fakeDocker) ImageInspect(ctx context.Context, imageID string, inspectOpts ...client.ImageInspectOption) (image.InspectResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ImageInspect", imageID); err != nil {
+	if err := f.record(ctx, "ImageInspect", imageID); err != nil {
 		return image.InspectResponse{}, err
 	}
 
@@ -354,7 +357,7 @@ func (f *fakeDocker) ImageInspect(ctx context.Context, imageID string, inspectOp
 func (f *fakeDocker) ImageRemove(ctx context.Context, imageID string, options image.RemoveOptions) ([]image.DeleteResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.record("ImageRemove", imageID); err != nil {
+	if err := f.record(ctx, "ImageRemove", imageID); err != nil {
 		return nil, err
 	}
 

@@ -13,6 +13,13 @@ YACU searches for a `yacu.yaml` config file in current working directory or uses
 
 In case of the docker container, `yacu.yaml` should be mounted in `/data` path of the container
 
+### Stopping
+When stopped (`SIGTERM`/`SIGINT`), yacu stops scanning and pulling right away, but a container update that is already in progress is always completed or rolled back first. Remaining updates are skipped until the next run. Sending the signal a second time exits immediately.
+
+Containers that depend on the updated one (compose `depends_on` with `service_healthy` or `service_completed_successfully`) and are still waiting for that condition at shutdown are left stopped rather than started early, and a warning is sent. Start them manually once the dependency is ready.
+
+Docker only waits 10 seconds before killing a container, which may not be enough to stop, recreate and start the container being updated. Give yacu more time, e.g. `stop_grace_period: 2m` in compose or `docker run --stop-timeout 120`.
+
 File examples can be viewed in `examples/config` folder in this repository.
 
 Configuration is applied in this order: built-in defaults, the YAML file, then
