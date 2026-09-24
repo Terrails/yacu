@@ -8,11 +8,10 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 	"github.com/opencontainers/go-digest"
 	"github.com/rs/zerolog"
+	"github.com/terrails/yacu/types/docker"
 	"github.com/terrails/yacu/types/image"
 	"github.com/terrails/yacu/utils"
 
@@ -20,7 +19,7 @@ import (
 )
 
 type Container struct {
-	Raw    *types.ContainerJSON
+	Raw    *container.InspectResponse
 	ID     string
 	Name   string
 	Labels map[string]string
@@ -33,10 +32,15 @@ type Container struct {
 
 type Containers []*Container
 
-func New(client *client.Client, data *types.ContainerJSON, stopTimeout, minImageAge int) (*Container, error) {
+func New(ctx context.Context, api docker.API, data *container.InspectResponse, stopTimeout, minImageAge int) (*Container, error) {
 	named, err := reference.ParseNormalizedNamed(data.Config.Image)
 	if err != nil {
-		return nil, err
+		// e.g. a container created from a bare image ID
+		return nil, fmt.Errorf("%w: %w", yacutypes.ErrInvalidReference, err)
+	}
+	if _, ok := named.(reference.Digested); ok {
+		// pulling by tag would silently replace the pinned image
+		return nil, yacutypes.ErrRepositoryPinned
 	}
 	named = reference.TagNameOnly(named)
 
@@ -46,7 +50,7 @@ func New(client *client.Client, data *types.ContainerJSON, stopTimeout, minImage
 		return nil, yacutypes.ErrRepositoryNotTagged
 	}
 
-	imageRaw, _, err := client.ImageInspectWithRaw(context.Background(), data.Image)
+	imageRaw, err := api.ImageInspect(ctx, data.Image)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +85,7 @@ func New(client *client.Client, data *types.ContainerJSON, stopTimeout, minImage
 }
 
 func (c *Container) IsRunning() bool {
-	return c.Raw.State.Status == "running"
+	return c.Raw.State.Status == container.StateRunning
 }
 
 func (c *Container) IsYacu() bool {
@@ -112,18 +116,12 @@ func (c *Container) CleanImageId() string {
 	}
 }
 
-func (c *Container) ShouldScan(all, stopped bool) bool {
-	// disable updating self for now
-	// TODO: implement
-	if c.IsYacu() {
+func ShouldScan(summary *container.Summary, all, stopped bool) bool {
+	if !stopped && summary.State != container.StateRunning {
 		return false
 	}
 
-	if !stopped && !c.IsRunning() {
-		return false
-	}
-
-	if val, ok := c.Labels[LABEL_ENABLE]; ok {
+	if val, ok := summary.Labels[LABEL_ENABLE]; ok {
 		if bval, err := strconv.ParseBool(val); err == nil {
 			return bval
 		} else {
@@ -146,17 +144,11 @@ func (c *Container) IsOutdated() (bool, error) {
 	return true, nil
 }
 
-func (c *Container) Stop(ctx context.Context, client *client.Client) error {
+func (c *Container) Stop(ctx context.Context, api docker.API) error {
 	logger := c.logger(ctx)
 	logger.Debug().Msg("Attempting to stop container")
 
-	if err := client.ContainerStop(
-		context.Background(),
-		c.ID,
-		container.StopOptions{
-			Timeout: &c.StopTimeout,
-		},
-	); err != nil {
+	if err := api.ContainerStop(ctx, c.ID, container.StopOptions{Timeout: &c.StopTimeout}); err != nil {
 		logger.Err(err).Msg("Failed to stop container")
 		return fmt.Errorf("failed to stop container %s: %w", c.Name, err)
 	}
@@ -164,18 +156,14 @@ func (c *Container) Stop(ctx context.Context, client *client.Client) error {
 	return nil
 }
 
-func (c *Container) Start(ctx context.Context, client *client.Client) error {
+func (c *Container) Start(ctx context.Context, api docker.API) error {
 	logger := c.logger(ctx)
 	logger.Debug().Msg("Attempting to start container")
 
 	// used to avoid odd `failed to create shim task` entrypoint errors when starting a newly created container
 	for i := 0; i < 3; i++ {
 		// do max 3 retries, if it fails after then its just broken
-		if err := client.ContainerStart(
-			context.Background(),
-			c.ID,
-			container.StartOptions{},
-		); err != nil {
+		if err := api.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
 			if i == 2 {
 				logger.Err(err).Msg("Failed to start container")
 				return fmt.Errorf("failed to start container %s: %w", c.Name, err)

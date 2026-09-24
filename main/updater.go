@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,16 +12,15 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/client"
 	"github.com/rs/zerolog"
 	"github.com/terrails/yacu/types/config"
 	"github.com/terrails/yacu/types/database"
+	"github.com/terrails/yacu/types/docker"
 	yacuimage "github.com/terrails/yacu/types/image"
 	"github.com/terrails/yacu/types/set"
 	"github.com/terrails/yacu/types/webhook"
@@ -32,8 +32,17 @@ import (
 	yacuregistry "github.com/terrails/yacu/types/registry"
 )
 
+// suffix given to a container while its replacement is being created
+const oldContainerSuffix = "-yacu-old"
+
+// how often checking a single container is attempted before giving up,
+// and the base delay between attempts
+const scanAttempts = 3
+
+var scanRetryDelay = time.Second * 2
+
 type Yacu struct {
-	Client   *client.Client
+	Client   docker.API
 	Webhooks *webhook.Webhooks
 
 	DB         database.Database
@@ -42,18 +51,27 @@ type Yacu struct {
 	Registries config.RegistryEntries
 }
 
+// updateError is a failed container update. Context names the step that failed.
+type updateError struct {
+	Context string
+	Err     error
+}
+
+func (e *updateError) Error() string { return fmt.Sprintf("%s: %v", e.Context, e.Err) }
+func (e *updateError) Unwrap() error { return e.Err }
+
 func (app Yacu) Run(ctx context.Context) {
 	logger := zerolog.Ctx(ctx)
 
 	containers, errs := app.FetchUpdates(ctx)
 	if len(errs) > 0 {
-		logger.Trace().Errs("errors", errs).Msg("Failed to fetch updates")
+		logger.Warn().Errs("errors", errs).Msg("Failed to fetch some updates")
 		for _, err := range errs {
 			app.Webhooks.Error(ctx, "Unable to fetch updates", err)
 		}
 
 		if app.Scanner.FailOnError {
-			logger.Fatal().Errs("errors", errs).Msg("Failed to fetch updates")
+			logger.Error().Msg("Not applying updates because scanning failed (scanner.fail_on_error)")
 			return
 		}
 	}
@@ -68,180 +86,46 @@ func (app Yacu) Run(ctx context.Context) {
 		logger.Info().Int("count", len(containers)).Msg("Found new updates")
 	}
 
-	// pull all new images at once
-	for _, container := range containers {
-		imageLogger := logger.With().Str("service", "image_pull").Str("image", container.RepositoryFamiliarized()).Logger()
-		imageCtx := imageLogger.WithContext(context.Background())
+	app.ApplyUpdates(ctx, containers)
+}
 
-		// check if image has already been pulled in case that multiple containers with the same image are being updated
-		if yes, err := app.IsLatestImagePresent(imageCtx, container.Repository); err != nil {
-			app.Webhooks.ImageError(imageCtx, container.Image, "Unable to check if image is latest", err)
-			return
-		} else if !yes {
-			imageLogger.Debug().Msg("Pulling image")
+// Pulls the new images and recreates the given containers.
+// A container is skipped when its image could not be pulled.
+func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Containers) {
+	logger := zerolog.Ctx(ctx)
 
-			if err = app.PullImage(imageCtx, container.Repository); err != nil {
-				app.Webhooks.ImageError(imageCtx, container.Image, "Unable to pull image", err)
-				return
-			}
-
-			newImageRaw, _, err := app.Client.ImageInspectWithRaw(context.Background(), container.Repository.String())
-			if err != nil {
-				imageLogger.Err(err).Msg("ImageInspect request failed")
-				app.Webhooks.ImageError(imageCtx, container.Image, "Unable to inspect image", err)
-				return
-			}
-
-			newImageData, err := yacuimage.NewData(&newImageRaw, container.Repository)
-			if err != nil {
-				app.Webhooks.ImageError(imageCtx, container.Image, "Unable to initialize image", err)
-				return
-			}
-
-			imageLogger.Info().Msg("Pulled image")
-			app.Webhooks.ImageUpdated(imageCtx, container.Image, newImageData)
-		}
-	}
+	failedImages := app.PullImages(ctx, containers)
 
 	successCount := 0
 	imgToRemove := set.NewImageSet()
 
-	// update all containers
 	for _, cnt := range containers {
 		containerLogger := logger.With().Str("service", "container_update").Str("container", cnt.Name).Str("image", cnt.RepositoryFamiliarized()).Logger()
-		containerCtx := containerLogger.WithContext(context.Background())
+		containerCtx := containerLogger.WithContext(ctx)
+
+		if _, failed := failedImages[cnt.Repository.String()]; failed {
+			containerLogger.Warn().Msg("Skipping container update as its image could not be pulled")
+			continue
+		}
 
 		containerLogger.Debug().Msg("Updating container")
 
-		var updateWarnings []string = []string{}
-
-		shouldRestart := cnt.IsRunning()
-		var dependantContainers yacucontainer.DependantContainers = nil
-
-		if shouldRestart {
-			dependantContainers, err := app.GetDependingContainers(containerCtx, cnt.Raw)
-			if err != nil {
-				app.Webhooks.ContainerError(containerCtx, cnt, "Unable to fetch depending containers", err)
-				continue
-			}
-
-			updateWarnings = append(updateWarnings, dependantContainers.Stop(containerCtx, app.Client)...)
-			if len(updateWarnings) > 0 {
-				containerLogger.Warn().Str("warnings", fmt.Sprintf("%v", updateWarnings)).Msg("Received warnings while stopping depending containers")
-			}
-
-			if err = cnt.Stop(containerCtx, app.Client); err != nil {
-				app.Webhooks.ContainerError(containerCtx, cnt, "Unable to stop container", err)
-				continue
-			}
-		}
-
-		var singleNetSettings network.NetworkingConfig = network.NetworkingConfig{}
-		for netName, netSettings := range cnt.Raw.NetworkSettings.Networks {
-			singleNetSettings.EndpointsConfig = map[string]*network.EndpointSettings{
-				netName: netSettings,
-			}
-			break
-		}
-
-		containerLogger.Debug().Msg("Removing container")
-		if err := app.Client.ContainerRemove(
-			context.Background(),
-			cnt.ID,
-			container.RemoveOptions{
-				Force:         true,
-				RemoveVolumes: app.Updater.RemoveVolumes,
-			},
-		); err != nil {
-			containerLogger.Err(err).Msg("Failed to remove container")
-			app.Webhooks.ContainerError(containerCtx, cnt, "Unable to remove container", err)
-			continue
-		}
-
-		containerLogger.Debug().Msg("Creating container")
-		response, err := app.Client.ContainerCreate(
-			context.Background(),
-			cnt.Raw.Config,
-			cnt.Raw.HostConfig,
-			&singleNetSettings,
-			nil,
-			cnt.Raw.Name,
-		)
-
+		newContainer, warnings, err := app.UpdateContainer(containerCtx, cnt)
 		if err != nil {
-			containerLogger.Err(err).Msg("Failed to create container")
-			app.Webhooks.ContainerError(containerCtx, cnt, "Unable to create container", err)
+			containerLogger.Err(err).Msg("Failed to update container")
+			var updateErr *updateError
+			if errors.As(err, &updateErr) {
+				app.Webhooks.ContainerError(containerCtx, cnt, updateErr.Context, updateErr.Err)
+			} else {
+				app.Webhooks.ContainerError(containerCtx, cnt, "Unable to update container", err)
+			}
 			continue
-		}
-
-		newId := response.ID
-		if len(response.Warnings) > 0 {
-			updateWarnings = append(updateWarnings, response.Warnings...)
-			containerLogger.Warn().Str("warnings", fmt.Sprintf("%v", response.Warnings)).Msg("Received warnings while creating container")
-		}
-
-		// cannot use multiple networks if host networking is enabled
-		if !cnt.Raw.HostConfig.NetworkMode.IsHost() {
-
-			// should be already connected to 1 network
-			if len(cnt.Raw.NetworkSettings.Networks) > 1 {
-				containerLogger.Debug().Msg("Connecting container to networks")
-			}
-
-			// Add other networks
-			for netName, netSettings := range cnt.Raw.NetworkSettings.Networks {
-
-				// skip already connected
-				if _, ok := singleNetSettings.EndpointsConfig[netName]; ok {
-					continue
-				}
-
-				containerLogger.Debug().Str("network", netName).Msg("Connecting container to network")
-
-				if err := app.Client.NetworkConnect(
-					context.Background(),
-					netName,
-					newId,
-					netSettings,
-				); err != nil {
-					containerLogger.Err(err).Str("network", netName).Msg("Connecting to network failed")
-					// since we already came this far, might as well do everything and send a warning about it
-					updateWarnings = append(updateWarnings, fmt.Sprintf("connecting to network %s failed: %v", netName, err))
-				}
-			}
-		}
-
-		newData, err := app.Client.ContainerInspect(context.Background(), newId)
-		if err != nil {
-			containerLogger.Err(err).Str("id", newId).Msg("ContainerInspect request failed")
-			app.Webhooks.ContainerError(containerCtx, cnt, "Unable to inspect container", err)
-			continue
-		}
-
-		newContainer, err := yacucontainer.New(app.Client, &newData, app.Updater.StopTimeout, app.Scanner.ImageAge)
-		if err != nil {
-			containerLogger.Err(err).Str("container", newData.Name).Msg("Initializing recreated container failed")
-			app.Webhooks.ContainerError(containerCtx, cnt, "Unable to initialize container", err)
-			continue
-		}
-
-		if shouldRestart {
-			if err = newContainer.Start(containerCtx, app.Client); err != nil {
-				app.Webhooks.ContainerError(containerCtx, cnt, "Unable to start container", err)
-				continue
-			}
-
-			warnings := dependantContainers.Start(containerCtx, app.Client)
-			if len(warnings) > 0 {
-				updateWarnings = append(updateWarnings, warnings...)
-				containerLogger.Warn().Str("warnings", fmt.Sprintf("%v", warnings)).Msg("Received warnings while starting depending containers")
-			}
 		}
 
 		successCount += 1
 		imgToRemove.Add(cnt.Image)
 		containerLogger.Info().Msg("Updated container")
-		app.Webhooks.ContainerUpdated(containerCtx, cnt, newContainer, updateWarnings...)
+		app.Webhooks.ContainerUpdated(containerCtx, cnt, newContainer, warnings...)
 	}
 
 	logger.Info().Int("total", len(containers)).Int("successful", successCount).Msg("Container updates completed")
@@ -253,14 +137,245 @@ func (app Yacu) Run(ctx context.Context) {
 	}
 }
 
+// Pulls the new image of every container.
+// The returned map holds the repositories that failed.
+func (app Yacu) PullImages(ctx context.Context, containers yacucontainer.Containers) map[string]error {
+	logger := zerolog.Ctx(ctx)
+
+	failed := map[string]error{}
+	handled := map[string]bool{}
+
+	for _, cnt := range containers {
+		repository := cnt.Repository.String()
+		if handled[repository] {
+			continue
+		}
+		handled[repository] = true
+
+		imageLogger := logger.With().Str("service", "image_pull").Str("image", cnt.RepositoryFamiliarized()).Logger()
+		imageCtx := imageLogger.WithContext(ctx)
+
+		if err := app.pullNewImage(imageCtx, cnt); err != nil {
+			failed[repository] = err
+		}
+	}
+	return failed
+}
+
+func (app Yacu) pullNewImage(ctx context.Context, cnt *yacucontainer.Container) error {
+	logger := zerolog.Ctx(ctx)
+
+	// the image may already be present, e.g. pulled manually since the scan
+	if yes, err := app.IsLatestImagePresent(ctx, cnt.Repository); err != nil {
+		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to check if image is latest", err)
+		return err
+	} else if yes {
+		return nil
+	}
+
+	logger.Debug().Msg("Pulling image")
+
+	if err := app.PullImage(ctx, cnt.Repository); err != nil {
+		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to pull image", err)
+		return err
+	}
+
+	newImageRaw, err := app.Client.ImageInspect(ctx, cnt.Repository.String())
+	if err != nil {
+		logger.Err(err).Msg("ImageInspect request failed")
+		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to inspect image", err)
+		return err
+	}
+
+	newImageData, err := yacuimage.NewData(&newImageRaw, cnt.Repository)
+	if err != nil {
+		app.Webhooks.ImageError(ctx, cnt.Image, "Unable to initialize image", err)
+		return err
+	}
+
+	logger.Info().Msg("Pulled image")
+	app.Webhooks.ImageUpdated(ctx, cnt.Image, newImageData)
+	return nil
+}
+
+// Recreates cnt from its (already pulled) image.
+//
+// The old container is renamed rather than removed until its replacement has
+// been created and started, so that any failure can be rolled back: the
+// replacement is removed, the old container gets its name back and it (and
+// any stopped dependants) is started again.
+func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Container) (*yacucontainer.Container, []string, error) {
+	logger := zerolog.Ctx(ctx)
+
+	warnings := []string{}
+	shouldRestart := cnt.IsRunning()
+	var dependantContainers yacucontainer.DependantContainers
+
+	// fail undoes the steps taken so far (most recent first), restarts the old
+	// container and its dependants if they were running, and returns the error
+	fail := func(context string, err error, undo ...func() error) error {
+		var rollbackErrs []error
+		for _, fn := range undo {
+			if undoErr := fn(); undoErr != nil {
+				rollbackErrs = append(rollbackErrs, undoErr)
+			}
+		}
+
+		if shouldRestart {
+			if startErr := cnt.Start(ctx, app.Client); startErr != nil {
+				rollbackErrs = append(rollbackErrs, startErr)
+			} else {
+				for _, warning := range dependantContainers.Start(ctx, app.Client, cnt.ID) {
+					rollbackErrs = append(rollbackErrs, errors.New(warning))
+				}
+			}
+		}
+
+		if len(rollbackErrs) > 0 {
+			logger.Error().Errs("errors", rollbackErrs).Msg("Rolling back container update failed")
+			err = errors.Join(err, fmt.Errorf("rollback failed: %w", errors.Join(rollbackErrs...)))
+		} else {
+			logger.Info().Msg("Rolled back container update")
+		}
+		return &updateError{Context: context, Err: err}
+	}
+
+	if shouldRestart {
+		var err error
+		dependantContainers, err = app.GetDependingContainers(ctx, cnt.Raw)
+		if err != nil {
+			return nil, nil, &updateError{Context: "Unable to fetch depending containers", Err: err}
+		}
+
+		stopWarnings := dependantContainers.Stop(ctx, app.Client)
+		if len(stopWarnings) > 0 {
+			warnings = append(warnings, stopWarnings...)
+			logger.Warn().Strs("warnings", stopWarnings).Msg("Received warnings while stopping depending containers")
+		}
+
+		if err = cnt.Stop(ctx, app.Client); err != nil {
+			return nil, nil, fail("Unable to stop container", err)
+		}
+	}
+
+	name := strings.TrimPrefix(cnt.Name, "/")
+	oldName := name + oldContainerSuffix
+
+	logger.Debug().Str("name", oldName).Msg("Renaming container")
+	if err := app.Client.ContainerRename(ctx, cnt.ID, oldName); err != nil {
+		logger.Err(err).Msg("Failed to rename container")
+		return nil, nil, fail("Unable to rename container", err)
+	}
+	renameBack := func() error {
+		if err := app.Client.ContainerRename(ctx, cnt.ID, name); err != nil {
+			return fmt.Errorf("renaming %s back to %s failed: %w", oldName, name, err)
+		}
+		return nil
+	}
+
+	var singleNetSettings network.NetworkingConfig = network.NetworkingConfig{}
+	for netName, netSettings := range cnt.Raw.NetworkSettings.Networks {
+		singleNetSettings.EndpointsConfig = map[string]*network.EndpointSettings{
+			netName: netSettings,
+		}
+		break
+	}
+
+	logger.Debug().Msg("Creating container")
+	response, err := app.Client.ContainerCreate(ctx, cnt.Raw.Config, cnt.Raw.HostConfig, &singleNetSettings, nil, name)
+	if err != nil {
+		logger.Err(err).Msg("Failed to create container")
+		return nil, nil, fail("Unable to create container", err, renameBack)
+	}
+
+	newId := response.ID
+	removeNew := func() error {
+		// the replacement's anonymous volumes are fresh and unused
+		if err := app.Client.ContainerRemove(ctx, newId, container.RemoveOptions{Force: true, RemoveVolumes: true}); err != nil {
+			return fmt.Errorf("removing new container %s failed: %w", utils.ShortId(newId), err)
+		}
+		return nil
+	}
+
+	if len(response.Warnings) > 0 {
+		warnings = append(warnings, response.Warnings...)
+		logger.Warn().Strs("warnings", response.Warnings).Msg("Received warnings while creating container")
+	}
+
+	// cannot use multiple networks if host networking is enabled
+	if !cnt.Raw.HostConfig.NetworkMode.IsHost() {
+
+		// should be already connected to 1 network
+		if len(cnt.Raw.NetworkSettings.Networks) > 1 {
+			logger.Debug().Msg("Connecting container to networks")
+		}
+
+		// Add other networks
+		for netName, netSettings := range cnt.Raw.NetworkSettings.Networks {
+
+			// skip already connected
+			if _, ok := singleNetSettings.EndpointsConfig[netName]; ok {
+				continue
+			}
+
+			logger.Debug().Str("network", netName).Msg("Connecting container to network")
+
+			if err := app.Client.NetworkConnect(ctx, netName, newId, netSettings); err != nil {
+				logger.Err(err).Str("network", netName).Msg("Connecting to network failed")
+				// since we already came this far, might as well do everything and send a warning about it
+				warnings = append(warnings, fmt.Sprintf("connecting to network %s failed: %v", netName, err))
+			}
+		}
+	}
+
+	newData, err := app.Client.ContainerInspect(ctx, newId)
+	if err != nil {
+		logger.Err(err).Str("id", newId).Msg("ContainerInspect request failed")
+		return nil, nil, fail("Unable to inspect container", err, removeNew, renameBack)
+	}
+
+	newContainer, err := yacucontainer.New(ctx, app.Client, &newData, app.Updater.StopTimeout, app.Scanner.ImageAge)
+	if err != nil {
+		logger.Err(err).Str("container", newData.Name).Msg("Initializing recreated container failed")
+		return nil, nil, fail("Unable to initialize container", err, removeNew, renameBack)
+	}
+
+	if shouldRestart {
+		if err = newContainer.Start(ctx, app.Client); err != nil {
+			return nil, nil, fail("Unable to start container", err, removeNew, renameBack)
+		}
+	}
+
+	// the replacement is in place, the old container is no longer needed
+	logger.Debug().Str("name", oldName).Msg("Removing previous container")
+	if err := app.Client.ContainerRemove(ctx, cnt.ID,
+		container.RemoveOptions{
+			Force:         true,
+			RemoveVolumes: app.Updater.RemoveVolumes,
+		},
+	); err != nil {
+		logger.Err(err).Str("name", oldName).Msg("Failed to remove previous container")
+		warnings = append(warnings, fmt.Sprintf("removing previous container %s failed: %v", oldName, err))
+	}
+
+	if shouldRestart {
+		startWarnings := dependantContainers.Start(ctx, app.Client, newId)
+		if len(startWarnings) > 0 {
+			warnings = append(warnings, startWarnings...)
+			logger.Warn().Strs("warnings", startWarnings).Msg("Received warnings while starting depending containers")
+		}
+	}
+
+	return newContainer, warnings, nil
+}
+
 func (app Yacu) FetchUpdates(ctx context.Context) (yacucontainer.Containers, []error) {
 	logger := zerolog.Ctx(ctx).With().Str("service", "scanner").Logger()
-	ctx = logger.WithContext(context.Background())
+	ctx = logger.WithContext(ctx)
 
-	// List all containers
 	cntList, err := app.Client.ContainerList(
-		context.Background(),
-		container.ListOptions{},
+		ctx,
+		container.ListOptions{All: true},
 	)
 
 	if err != nil {
@@ -270,58 +385,76 @@ func (app Yacu) FetchUpdates(ctx context.Context) (yacucontainer.Containers, []e
 	containers := yacucontainer.Containers{}
 	var updateErrors []error = []error{}
 
-	// I want to be able to repeat an iteration
-	for _, c := range cntList {
-		var tryCount int = 0
-		for {
-			tryCount += 1
-			if tryCount > 3 {
-				break
-			}
+	for i := range cntList {
+		summary := &cntList[i]
 
-			if container, err := app.CheckIfContainerIsUpdateable(ctx, &c); err != nil {
-				logger.Trace().Err(err).Str("container", c.ID).Msg("Failed to check if container is updateable")
-				if tryCount == 3 {
-					updateErrors = append(updateErrors, fmt.Errorf("checking if container %s is updateable faiguess thats what happens when you dont have led: %w", c.ID, err))
-				}
-			} else if container != nil {
-				// Process the updateable container
-				containers = append(containers, container)
-				break
-			}
+		if !yacucontainer.ShouldScan(summary, app.Scanner.ScanAll, app.Scanner.ScanStopped) {
+			continue
+		}
+
+		if container, err := app.checkContainerWithRetry(ctx, summary); err != nil {
+			updateErrors = append(updateErrors, err)
+		} else if container != nil {
+			containers = append(containers, container)
 		}
 	}
 
 	return containers, updateErrors
 }
 
-func (app Yacu) CheckIfContainerIsUpdateable(ctx context.Context, c *types.Container) (*yacucontainer.Container, error) {
+func (app Yacu) checkContainerWithRetry(ctx context.Context, summary *container.Summary) (*yacucontainer.Container, error) {
+	logger := zerolog.Ctx(ctx)
+
+	var err error
+	for attempt := 1; attempt <= scanAttempts; attempt++ {
+		var cnt *yacucontainer.Container
+		if cnt, err = app.CheckIfContainerIsUpdateable(ctx, summary); err == nil {
+			return cnt, nil
+		}
+
+		logger.Debug().Err(err).Str("container", summary.ID).Int("attempt", attempt).Msg("Failed to check if container is updateable")
+		if attempt < scanAttempts {
+			time.Sleep(scanRetryDelay * time.Duration(attempt))
+		}
+	}
+
+	var containerName string
+	if len(summary.Names) > 0 {
+		containerName = strings.TrimPrefix(summary.Names[0], "/")
+	} else {
+		containerName = summary.ID
+	}
+
+	return nil, fmt.Errorf("checking if container %s is updateable failed: %w", containerName, err)
+}
+
+func (app Yacu) CheckIfContainerIsUpdateable(ctx context.Context, c *container.Summary) (*yacucontainer.Container, error) {
 	logger := zerolog.Ctx(ctx).With().
 		Str("container", c.ID).
 		Str("image", c.Image).
 		Logger()
-	ctx = logger.WithContext(context.Background())
+	ctx = logger.WithContext(ctx)
 
 	// fetch detailed info
-	ci, err := app.Client.ContainerInspect(context.Background(), c.ID)
+	ci, err := app.Client.ContainerInspect(ctx, c.ID)
 	if err != nil {
 		logger.Err(err).Str("id", c.ID).Msg("ContainerInspect request failed")
 		return nil, fmt.Errorf("inspecting container %s failed: %w", c.ID, err)
 	}
 
-	container, err := yacucontainer.New(app.Client, &ci, app.Updater.StopTimeout, app.Scanner.ImageAge)
+	container, err := yacucontainer.New(ctx, app.Client, &ci, app.Updater.StopTimeout, app.Scanner.ImageAge)
 	if err != nil {
-		if errors.Is(err, yacutypes.ErrRepositoryNotTagged) {
-			// skip over any repositories that use digests as there are no updates for those
+		if yacutypes.IsUnsupportedImage(err) {
+			// local builds, digest references and pinned tags have no updates to pull
+			logger.Debug().Err(err).Str("container", ci.Name).Msg("Skipping container with unsupported image")
 			return nil, nil
-		} else {
-			logger.Err(err).Str("container", ci.Name).Msg("Container initialization failed")
-			return nil, fmt.Errorf("initializing container %s failed: %w", ci.Name, err)
 		}
+		logger.Err(err).Str("container", ci.Name).Msg("Container initialization failed")
+		return nil, fmt.Errorf("initializing container %s failed: %w", ci.Name, err)
 	}
 
-	// checks labels and config related flags
-	if !container.ShouldScan(app.Scanner.ScanAll, app.Scanner.ScanStopped) {
+	// do not update self
+	if container.IsYacu() {
 		return nil, nil
 	}
 
@@ -342,7 +475,7 @@ func (app Yacu) IsRemotePullable(ctx context.Context, container *yacucontainer.C
 		Str("container", container.Name).
 		Str("image", container.RepositoryFamiliarized()).
 		Logger()
-	ctx = logger.WithContext(context.Background())
+	ctx = logger.WithContext(ctx)
 
 	familiarNameTagged := container.RepositoryFamiliarized()
 
@@ -437,7 +570,7 @@ func (app Yacu) IsRemotePullable(ctx context.Context, container *yacucontainer.C
 func (app Yacu) IsLatestImagePresent(ctx context.Context, named reference.NamedTagged) (bool, error) {
 	logger := zerolog.Ctx(ctx)
 
-	currentImgData, _, err := app.Client.ImageInspectWithRaw(context.Background(), named.String())
+	currentImgData, err := app.Client.ImageInspect(ctx, named.String())
 	if err != nil {
 		logger.Err(err).Msg("InspectImage request failed")
 		return false, fmt.Errorf("inspecting image %s failed: %w", named.String(), err)
@@ -466,6 +599,15 @@ func (app Yacu) IsLatestImagePresent(ctx context.Context, named reference.NamedT
 	return false, nil
 }
 
+// pullMessage is the part of the image pull progress stream that reports errors.
+// The daemon reports pull failures inside the stream, not as an API error.
+type pullMessage struct {
+	Error       string `json:"error"`
+	ErrorDetail *struct {
+		Message string `json:"message"`
+	} `json:"errorDetail"`
+}
+
 func (app Yacu) PullImage(ctx context.Context, repository reference.NamedTagged) error {
 	logger := zerolog.Ctx(ctx)
 
@@ -487,7 +629,7 @@ func (app Yacu) PullImage(ctx context.Context, repository reference.NamedTagged)
 	}
 
 	response, err := app.Client.ImagePull(
-		context.Background(),
+		ctx,
 		repository.String(),
 		pullOptions,
 	)
@@ -499,31 +641,56 @@ func (app Yacu) PullImage(ctx context.Context, repository reference.NamedTagged)
 
 	defer response.Close()
 
-	if _, err := io.ReadAll(response); err != nil {
-		logger.Err(err).Msg("Failure while pulling image")
-		return fmt.Errorf("failure while pulling image: %w", err)
-	}
+	decoder := json.NewDecoder(response)
+	for {
+		var msg pullMessage
+		if err := decoder.Decode(&msg); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			logger.Err(err).Msg("Failure while pulling image")
+			return fmt.Errorf("failure while pulling image: %w", err)
+		}
 
-	return nil
+		if msg.ErrorDetail != nil && len(msg.ErrorDetail.Message) > 0 {
+			msg.Error = msg.ErrorDetail.Message
+		}
+		if len(msg.Error) > 0 {
+			logger.Error().Str("error", msg.Error).Msg("Failure while pulling image")
+			return fmt.Errorf("failure while pulling image: %s", msg.Error)
+		}
+	}
 }
 
-func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.ContainerJSON) (yacucontainer.DependantContainers, error) {
+// Finds the running containers that declare a compose depends_on on the given container.
+//
+// Compose records dependencies by service name, so for compose containers the
+// service name is matched within the same project or otherwise the container name is matched.
+func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *container.InspectResponse) (yacucontainer.DependantContainers, error) {
 	logger := zerolog.Ctx(ctx)
 	logger.Debug().Msg("Fetching depending containers")
 
+	target := strings.TrimPrefix(dependsOn.Name, "/")
+	listFilters := filters.NewArgs(
+		filters.KeyValuePair{
+			Key: "label", Value: yacucontainer.LABEL_DEPENDS_ON,
+		},
+		filters.KeyValuePair{
+			Key: "status", Value: "running",
+		},
+	)
+
+	project := dependsOn.Config.Labels[yacucontainer.LABEL_PROJECT]
+	service := dependsOn.Config.Labels[yacucontainer.LABEL_SERVICE]
+	if len(project) > 0 && len(service) > 0 {
+		target = service
+		listFilters.Add("label", yacucontainer.LABEL_PROJECT+"="+project)
+	}
+
 	// list all containers with the compose label
 	containers, err := app.Client.ContainerList(
-		context.Background(),
-		container.ListOptions{
-			Filters: filters.NewArgs(
-				filters.KeyValuePair{
-					Key: "label", Value: yacucontainer.LABEL_DEPENDS_ON,
-				},
-				filters.KeyValuePair{
-					Key: "status", Value: "running",
-				},
-			),
-		},
+		ctx,
+		container.ListOptions{Filters: listFilters},
 	)
 	if err != nil {
 		logger.Err(err).Msg("ContainerList request failed")
@@ -531,24 +698,26 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.Con
 	}
 
 	dependantContainers := yacucontainer.DependantContainers{}
-	for _, container := range containers {
+	for i := range containers {
+		c := &containers[i]
+
 		// no need to check if it exists as it is filtered that way
-		val := container.Labels[yacucontainer.LABEL_DEPENDS_ON]
+		val := c.Labels[yacucontainer.LABEL_DEPENDS_ON]
 		// skip if value is empty
 		if len(val) == 0 {
 			continue
 		}
 
+		// format: service[:condition[:restart]],...
 		for _, value := range strings.Split(val, ",") {
 			depVals := strings.Split(value, ":")
 
 			dependency := depVals[0]
-			if dependency != dependsOn.Name[1:] {
+			if dependency != target {
 				continue
 			}
 
 			condition := yacucontainer.DEPENDENCY_HEALTHY
-			restart := true
 
 			if len(depVals) > 1 {
 				condStr := strings.ToLower(depVals[1])
@@ -559,16 +728,16 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.Con
 				} // else DEPENDENCY_HEALTHY
 
 				if len(depVals) > 2 {
-					restart, err = strconv.ParseBool(depVals[2])
+					restart, err := strconv.ParseBool(depVals[2])
 					// can recreate without restarting this container if false
 					if err == nil && !restart {
-						continue
+						break
 					}
 				}
 			}
 
-			container := yacucontainer.NewDependant(&container, app.Updater.StopTimeout, dependsOn, condition)
-			dependantContainers = append(dependantContainers, container)
+			dependant := yacucontainer.NewDependant(c, app.Updater.StopTimeout, target, condition)
+			dependantContainers = append(dependantContainers, dependant)
 			// can be stopped as there cannot be multiple instances of the same dependency
 			break
 		}
@@ -579,8 +748,9 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *types.Con
 func (app Yacu) RemoveUnusedImages(ctx context.Context, images ...*yacuimage.ImageData) (count int) {
 	logger := zerolog.Ctx(ctx)
 
+	// include stopped containers, their images are still in use
 	containers, err := app.Client.ContainerList(
-		context.Background(), container.ListOptions{},
+		ctx, container.ListOptions{All: true},
 	)
 
 	if err != nil {
@@ -600,12 +770,12 @@ func (app Yacu) RemoveUnusedImages(ctx context.Context, images ...*yacuimage.Ima
 
 		if removeImage {
 			imageLogger := logger.With().Str("id", img.ID).Logger()
-			imageCtx := imageLogger.WithContext(context.Background())
+			imageCtx := imageLogger.WithContext(ctx)
 
 			imageLogger.Debug().Msg("Removing unused image")
 
 			response, err := app.Client.ImageRemove(
-				context.Background(),
+				ctx,
 				img.ID,
 				image.RemoveOptions{
 					Force: true,

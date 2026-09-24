@@ -13,6 +13,7 @@ scanner:
   image_age:    7
   scan_all:     false
   scan_stopped: false
+  fail_on_error: false
 
 updater:
   stop_timeout:     30

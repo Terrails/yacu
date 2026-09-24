@@ -38,7 +38,7 @@ func GetDefaultConfig() *Config {
 			ImageAge:    7,
 			ScanAll:     false,
 			ScanStopped: false,
-			FailOnError: true,
+			FailOnError: false,
 		},
 		Updater: Updater{
 			StopTimeout:   30,

@@ -71,14 +71,16 @@ logging:
 `interval` — an interval using cron format (default `@weekly`)  
 `image_age` — how old an image should be in days before pulling and updating container (default `7`)  
 `scan_all` — scan all containers on device unless explicitly disabled using `yacu.enable` label (default `false`)  
-`scan_stopped` — scan an eligible container even if it is not running (default `false`)
+`scan_stopped` — scan an eligible container even if it is not running (default `false`)  
+`fail_on_error` — skip applying any updates in a run where checking a container failed, instead of updating the containers that were checked successfully (default `false`)
 
 ```
 scanner:
-  interval:     "@weekly"
-  image_age:    7
-  scan_all:     false
-  scan_stopped: false
+  interval:      "@weekly"
+  image_age:     7
+  scan_all:      false
+  scan_stopped:  false
+  fail_on_error: false
 ```
 
 ### Updater

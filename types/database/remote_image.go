@@ -16,23 +16,18 @@ type RemoteImageRow struct {
 }
 
 func (d Database) GetRemoteImageFromId(imageId int64) (*RemoteImageRow, error) {
-	return d.getRemoteImage("SELECT * FROM remote_images WHERE id=?", imageId)
+	return d.getRemoteImage("SELECT id, name, domain, created, digest, last_check FROM remote_images WHERE id=?", imageId)
 }
 
 func (d Database) GetRemoteImageFromName(imageName string) (*RemoteImageRow, error) {
-	return d.getRemoteImage("SELECT * FROM remote_images WHERE name=?", imageName)
+	return d.getRemoteImage("SELECT id, name, domain, created, digest, last_check FROM remote_images WHERE name=?", imageName)
 }
 
 func (d Database) getRemoteImage(stmt string, args ...any) (*RemoteImageRow, error) {
-	row, err := d.QueryRow(stmt, args...)
-	if err != nil {
-		return nil, err
-	}
-
 	var id int64
 	var name, domain, rcreated, rdigest, rlastcheck string
 
-	err = row.Scan(&id, &name, &domain, &rcreated, &rdigest, &rlastcheck)
+	err := d.DB.QueryRow(stmt, args...).Scan(&id, &name, &domain, &rcreated, &rdigest, &rlastcheck)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +62,7 @@ func (d Database) SaveRemoteImage(name string, domain string, created time.Time,
 	rcreated := created.UTC().Format(time.RFC3339Nano)
 	rdigest := digest.String()
 
-	result, err := d.Exec(
+	result, err := d.DB.Exec(
 		`INSERT OR REPLACE 
 			INTO remote_images (name, domain, created, digest, last_check) 
 			VALUES (?, ?, ?, ?, ?)`,
@@ -90,13 +85,13 @@ func (d Database) UpdateRemoteImage(rowid int64, created *time.Time, digest *dig
 	rcreated := created.UTC().Format(time.RFC3339Nano)
 	rdigest := digest.String()
 
-	_, err := d.Exec("UPDATE remote_images SET created=?, digest=? WHERE id=?", rcreated, rdigest, rowid)
+	_, err := d.DB.Exec("UPDATE remote_images SET created=?, digest=? WHERE id=?", rcreated, rdigest, rowid)
 	return err
 }
 
 func (d Database) UpdateRemoteImageCheck(rowid int64) error {
 	lastCheck := time.Now().UTC().Format(time.RFC3339Nano)
 
-	_, err := d.Exec("UPDATE remote_images SET last_check=? WHERE id=?", lastCheck, rowid)
+	_, err := d.DB.Exec("UPDATE remote_images SET last_check=? WHERE id=?", lastCheck, rowid)
 	return err
 }
