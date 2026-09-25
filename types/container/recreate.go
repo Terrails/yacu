@@ -32,6 +32,16 @@ func (c *Container) CreateConfig() *container.Config {
 		config.Hostname = ""
 	}
 
+	// a container joining another's network namespace (network_mode container:<parent>)
+	// is given the parent's host and domain name when started, and the daemon rejects
+	// creating one with those or with exposed ports, which only the image's EXPOSE can
+	// have put there
+	if c.Raw.HostConfig != nil && c.Raw.HostConfig.NetworkMode.IsContainer() {
+		config.Hostname = ""
+		config.Domainname = ""
+		config.ExposedPorts = nil
+	}
+
 	if c.Image == nil || c.Image.Raw == nil || c.Image.Raw.Config == nil {
 		return &config
 	}

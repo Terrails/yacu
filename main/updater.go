@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +106,19 @@ func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Conta
 	logger := zerolog.Ctx(ctx)
 
 	failedImages := app.PullImages(ctx, containers)
+
+	// containers joining another's namespaces go first. Updating that other container
+	// recreates them, after which the containers scanned here no longer exist
+	containers = slices.Clone(containers)
+	slices.SortStableFunc(containers, func(a, b *yacucontainer.Container) int {
+		switch aShares, bShares := sharesNamespace(a), sharesNamespace(b); {
+		case aShares && !bShares:
+			return -1
+		case !aShares && bShares:
+			return 1
+		}
+		return 0
+	})
 
 	successCount := 0
 	imgToRemove := set.NewImageSet()
@@ -225,6 +239,9 @@ func (app Yacu) pullNewImage(ctx context.Context, cnt *yacucontainer.Container) 
 // replacement is removed, the old container gets its name back and it (and
 // any stopped dependants) is started again.
 //
+// Containers joining a namespace of cnt (network_mode container:<cnt>) are
+// stopped with it and made to join the replacement.
+//
 // Once started, an update is not interrupted by shutdown (ctx cancelled) so
 // that it always ends committed or rolled back. Only waiting on the conditions
 // of dependants is cut short, those still waiting are left stopped.
@@ -237,6 +254,7 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 	warnings := []string{}
 	shouldRestart := cnt.IsRunning()
 	var dependantContainers yacucontainer.DependantContainers
+	var children namespaceChildren
 
 	// fail undoes the steps taken so far (most recent first), restarts the old
 	// container and its dependants if they were running, and returns the error
@@ -252,6 +270,7 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 			if startErr := cnt.Start(ctx, app.Client); startErr != nil {
 				rollbackErrs = append(rollbackErrs, startErr)
 			} else {
+				rollbackErrs = append(rollbackErrs, app.startNamespaceChildren(ctx, children)...)
 				for _, warning := range dependantContainers.Start(shutdownCtx, app.Client, cnt.ID) {
 					rollbackErrs = append(rollbackErrs, errors.New(warning))
 				}
@@ -279,8 +298,21 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 		if err != nil {
 			return nil, nil, &updateError{Context: "Unable to fetch depending containers", Err: err}
 		}
+	}
 
+	// needed even if cnt is not running, as children referencing it by ID could never start again otherwise
+	children, err = app.GetNamespaceChildren(ctx, cnt.Raw, dependantContainers)
+	if err != nil {
+		return nil, nil, &updateError{Context: "Unable to fetch containers sharing namespaces", Err: err}
+	}
+	// compose makes a child depend on its parent, but it is handled as a child
+	dependantContainers = slices.DeleteFunc(dependantContainers, func(d *yacucontainer.DependantContainer) bool {
+		return children.contains(d.Data.ID)
+	})
+
+	if shouldRestart {
 		stopWarnings := dependantContainers.Stop(ctx, app.Client)
+		stopWarnings = append(stopWarnings, app.stopNamespaceChildren(ctx, children)...)
 		if len(stopWarnings) > 0 {
 			warnings = append(warnings, stopWarnings...)
 			logger.Warn().Strs("warnings", stopWarnings).Msg("Received warnings while stopping depending containers")
@@ -378,6 +410,16 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 	if shouldRestart {
 		if err = newContainer.Start(ctx, app.Client); err != nil {
 			return nil, nil, fail("Unable to start container", err, removeNew, renameBack)
+		}
+	}
+
+	// before the previous container is removed, which children may still reference
+	if len(children) > 0 {
+		logger.Debug().Int("count", len(children)).Msg("Moving containers sharing namespaces to the new container")
+		childWarnings := app.reattachNamespaceChildren(ctx, children, cnt.Raw, newId)
+		if len(childWarnings) > 0 {
+			warnings = append(warnings, childWarnings...)
+			logger.Warn().Strs("warnings", childWarnings).Msg("Received warnings while moving containers sharing namespaces")
 		}
 	}
 

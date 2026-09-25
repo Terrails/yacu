@@ -259,3 +259,15 @@ func TestCreateHostConfigWithoutAnonymousVolumes(t *testing.T) {
 		t.Fatalf("expected the host config unchanged, got binds %v mounts %+v", got.Binds, got.Mounts)
 	}
 }
+
+func TestCreateConfigForContainerNetworkMode(t *testing.T) {
+	// given the parent's host name when started, and the image's exposed port
+	config := &container.Config{Hostname: "parent-host", Domainname: "parent.lan", ExposedPorts: nat.PortSet{"8080/tcp": {}}}
+	hostConfig := &container.HostConfig{NetworkMode: "container:vpn"}
+
+	got := newRecreateContainer(config, hostConfig, imageConfig(ocispec.ImageConfig{}, nil)).CreateConfig()
+
+	if got.Hostname != "" || got.Domainname != "" || got.ExposedPorts != nil {
+		t.Fatalf("the daemon rejects these with container network mode: %+v", got)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -81,7 +82,7 @@ func (f *fakeDocker) pullError(ref, message string) {
 
 func (f *fakeDocker) addContainer(name, ref string, labels map[string]string, running bool) string {
 	f.nextID++
-	id := fmt.Sprintf("%064d", f.nextID)
+	id := strings.Repeat(fmt.Sprintf("%04x", f.nextID), 16)
 
 	status := container.StateExited
 	if running {
@@ -134,12 +135,18 @@ func (f *fakeDocker) record(ctx context.Context, method, id string) error {
 	return ctx.Err()
 }
 
+// resolves like the daemon: full ID, name, then ID prefix
 func (f *fakeDocker) lookup(idOrName string) (*container.InspectResponse, error) {
 	if c, ok := f.containers[idOrName]; ok {
 		return c, nil
 	}
 	if c := f.byName(strings.TrimPrefix(idOrName, "/")); c != nil {
 		return c, nil
+	}
+	for id, c := range f.containers {
+		if len(idOrName) > 0 && strings.HasPrefix(id, idOrName) {
+			return c, nil
+		}
 	}
 	return nil, fmt.Errorf("No such container: %s", idOrName)
 }
@@ -170,14 +177,16 @@ func (f *fakeDocker) ContainerList(ctx context.Context, options container.ListOp
 			continue
 		}
 
-		list = append(list, container.Summary{
+		summary := container.Summary{
 			ID:      c.ID,
 			Names:   []string{c.Name},
 			Image:   c.Config.Image,
 			ImageID: c.Image,
 			Labels:  maps.Clone(c.Config.Labels),
 			State:   c.State.Status,
-		})
+		}
+		summary.HostConfig.NetworkMode = string(c.HostConfig.NetworkMode)
+		list = append(list, summary)
 	}
 	return list, nil
 }
@@ -224,6 +233,17 @@ func (f *fakeDocker) ContainerStart(ctx context.Context, containerID string, opt
 	c, err := f.lookup(containerID)
 	if err != nil {
 		return err
+	}
+	// joining another container's network requires it to be running, and gives its host name
+	if ref := c.HostConfig.NetworkMode.ConnectedContainer(); len(ref) > 0 {
+		parent, err := f.lookup(ref)
+		if err != nil {
+			return fmt.Errorf("cannot join network namespace of container: %w", err)
+		}
+		if parent.State.Status != container.StateRunning {
+			return fmt.Errorf("cannot join network namespace of a non running container: %s", parent.ID)
+		}
+		c.Config.Hostname = parent.Config.Hostname
 	}
 	c.State.Status, c.State.Running = container.StateRunning, true
 	return nil
@@ -272,9 +292,18 @@ func (f *fakeDocker) ContainerCreate(ctx context.Context, config *container.Conf
 	if f.byName(containerName) != nil {
 		return container.CreateResponse{}, fmt.Errorf("Conflict. The container name %q is already in use", "/"+containerName)
 	}
+	// the daemon's validation of a container joining another's network
+	if hostConfig.NetworkMode.IsContainer() {
+		if len(config.Hostname) > 0 {
+			return container.CreateResponse{}, errors.New("conflicting options: hostname and the network mode")
+		}
+		if len(config.ExposedPorts) > 0 {
+			return container.CreateResponse{}, errors.New("conflicting options: port exposing and the container type network mode")
+		}
+	}
 
 	f.nextID++
-	id := fmt.Sprintf("%064d", f.nextID)
+	id := strings.Repeat(fmt.Sprintf("%04x", f.nextID), 16)
 	f.containers[id] = &container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{
 			ID:         id,

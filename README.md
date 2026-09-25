@@ -153,6 +153,11 @@ webhooks:
       container_success:    true
 ```
 
+## Containers sharing a network
+Containers joining the network (or IPC/PID) namespace of an updated container, e.g. apps behind a VPN container with `network_mode: "service:gluetun"` in compose or `--network container:gluetun`, are stopped with it and afterwards join its replacement. Compose references the container by ID, so those containers are recreated from the image they run. If their image tag meanwhile refers to a different image, they are left stopped with a warning instead, so that they are not updated along with it; recreate them yourself, e.g. with `docker compose up -d`.
+
+Containers that share only the IPC or PID namespace are found through compose's `depends_on`, which compose adds for them. Those created with `docker run --ipc`/`--pid container:<name>` are not handled.
+
 ## Labels
 
 `yacu.enable` — allow/disallow yacu from scanning the container, bypasses `scanner.scan_all` [`true`, `false`]  
