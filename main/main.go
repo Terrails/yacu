@@ -23,6 +23,12 @@ import (
 const dockerCallTimeout = 2 * time.Minute
 
 func main() {
+	os.Exit(run())
+}
+
+// runs yacu until shut down, returning the exit code. Separate from main so that
+// deferred cleanup runs before exiting
+func run() int {
 	configPathPtr := flag.String("config", "yacu.yaml", "Path to config file. By default checks for 'yacu.yaml' in current directory.")
 	flag.Parse()
 
@@ -97,11 +103,9 @@ func main() {
 		nextTime, err := gronx.NextTick(config.Scanner.Interval, false)
 
 		if err != nil {
-			logger.Err(err).Msg("unknown error while calculating next run time")
-			if utils.Sleep(ctx, time.Second*3) != nil {
-				break
-			}
-			continue
+			// it fired at startup validation, so this was its last run, e.g. a year given in it has passed
+			logger.Error().Err(err).Str("interval", config.Scanner.Interval).Msg("scanner.interval does not fire anymore, exiting")
+			return 1
 		}
 
 		timeRemaining := time.Until(nextTime)
@@ -119,4 +123,5 @@ func main() {
 	// the loop only ends once shutdown was requested
 	<-shutdownLogged
 	logger.Info().Msg("shut down")
+	return 0
 }

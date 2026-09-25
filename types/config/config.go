@@ -172,8 +172,5 @@ func (c *Config) ApplyEnvironment() error {
 }
 
 func (c Config) Validate() error {
-	if !c.Scanner.IsIntervalValid() {
-		return fmt.Errorf("invalid cron format for scanner.interval: %q", c.Scanner.Interval)
-	}
-	return nil
+	return c.Scanner.ValidateInterval()
 }

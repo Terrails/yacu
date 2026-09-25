@@ -26,10 +26,14 @@ type LoggingConfig struct {
 }
 
 func (c LoggingConfig) CreateLogger() *zerolog.Logger {
+	return c.createLogger(os.Stdout)
+}
+
+func (c LoggingConfig) createLogger(console io.Writer) *zerolog.Logger {
 	consoleWriter := &zerolog.FilteredLevelWriter{
 		Writer: zerolog.LevelWriterAdapter{
 			Writer: zerolog.ConsoleWriter{
-				Out:        os.Stdout,
+				Out:        console,
 				TimeFormat: time.RFC3339,
 			},
 		},
@@ -43,10 +47,11 @@ func (c LoggingConfig) CreateLogger() *zerolog.Logger {
 		return &logger
 	}
 
-	if err := os.MkdirAll(c.File.Directory, 0744); err != nil {
+	if err := os.MkdirAll(c.File.Directory, 0755); err != nil {
 		logger := zerolog.New(consoleWriter).
 			With().Timestamp().Caller().
 			Logger()
+		logger.Warn().Err(err).Str("directory", c.File.Directory).Msg("creating log directory failed, logging to console only")
 		return &logger
 	}
 

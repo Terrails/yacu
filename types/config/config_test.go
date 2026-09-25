@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -51,5 +52,19 @@ func TestLoadConfigRejectsInvalidInterval(t *testing.T) {
 
 	if _, err := LoadConfig(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Fatal("expected invalid interval to fail")
+	}
+}
+
+func TestLoadConfigRejectsIntervalThatNeverFires(t *testing.T) {
+	// valid cron expressions without a next run time
+	for _, interval := range []string{"0 0 30 2 *", "0 0 1 1 * 2025"} {
+		t.Run(interval, func(t *testing.T) {
+			t.Setenv("YACU_SCANNER_INTERVAL", interval)
+
+			_, err := LoadConfig(filepath.Join(t.TempDir(), "missing.yaml"))
+			if err == nil || !strings.Contains(err.Error(), "never fires") {
+				t.Fatalf("expected the interval to be rejected, got %v", err)
+			}
+		})
 	}
 }

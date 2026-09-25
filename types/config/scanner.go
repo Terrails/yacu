@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+
 	"github.com/adhocore/gronx"
 )
 
@@ -12,7 +14,14 @@ type Scanner struct {
 	FailOnError bool   `yaml:"fail_on_error"`
 }
 
-func (s Scanner) IsIntervalValid() bool {
-	gron := gronx.New()
-	return gron.IsValid(s.Interval)
+// Checks that the interval is a cron expression that fires at least once more.
+// A valid one may not, e.g. `0 0 30 2 *` (February 30th) or one with a past year.
+func (s Scanner) ValidateInterval() error {
+	if !gronx.New().IsValid(s.Interval) {
+		return fmt.Errorf("invalid cron format for scanner.interval: %q", s.Interval)
+	}
+	if _, err := gronx.NextTick(s.Interval, false); err != nil {
+		return fmt.Errorf("scanner.interval %q never fires: %w", s.Interval, err)
+	}
+	return nil
 }
