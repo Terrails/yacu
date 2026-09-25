@@ -500,3 +500,54 @@ func TestRemoveUnusedImagesKeepsImagesOfStoppedContainers(t *testing.T) {
 		t.Fatal("unused image was not removed")
 	}
 }
+
+func TestApplyUpdatesPullsWhenTagIsMissing(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/app:latest", sha('a'), oldCreated, "test/app@"+sha('1'))
+	id := api.addContainer("app", "test/app:latest", nil, true)
+	app := newTestApp(t, api)
+	hook := withRecordingHook(app)
+	cnt := loadContainer(t, app, id)
+
+	// the container still runs its image, but the tag no longer exists locally
+	delete(api.tags, normalize("test/app:latest"))
+
+	created, _ := time.Parse(time.RFC3339, newCreated)
+	if _, err := app.DB.SaveRemoteImage("test/app:latest", "docker.io", created, digest.Digest(sha('9'))); err != nil {
+		t.Fatal(err)
+	}
+	api.addUntaggedImage(sha('c'), newCreated, "test/app@"+sha('9'))
+	api.pullResult("test/app:latest", sha('c'))
+
+	app.ApplyUpdates(context.Background(), yacucontainer.Containers{cnt})
+
+	if hook.errors != 0 {
+		t.Fatalf("%d error notifications sent", hook.errors)
+	}
+	if got := api.byName("app"); got == nil || got.ID == id || got.Image != sha('c') {
+		t.Fatal("container was not updated after pulling its missing tag")
+	}
+}
+
+func TestPullImagesFailsOnInspectErrors(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/app:latest", sha('a'), oldCreated, "test/app@"+sha('1'))
+	id := api.addContainer("app", "test/app:latest", nil, true)
+	app := newTestApp(t, api)
+	hook := withRecordingHook(app)
+	cnt := loadContainer(t, app, id)
+
+	api.fail = failWhen("ImageInspect", func(ref string) bool { return ref == normalize("test/app:latest") })
+
+	failed := app.PullImages(context.Background(), yacucontainer.Containers{cnt})
+
+	if _, ok := failed[cnt.Repository.String()]; !ok {
+		t.Fatal("image was not reported as failed")
+	}
+	if api.called("ImagePull", normalize("test/app:latest")) != 0 {
+		t.Fatal("image was pulled although checking it failed")
+	}
+	if hook.errors != 1 {
+		t.Fatalf("%d error notifications sent, want 1", hook.errors)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -654,6 +655,12 @@ func (app Yacu) IsLatestImagePresent(ctx context.Context, named reference.NamedT
 
 	currentImgData, err := app.Client.ImageInspect(ctx, named.String())
 	if err != nil {
+		if cerrdefs.IsNotFound(err) {
+			// the tag can be gone while the container still runs the image it was created
+			// from, e.g. after `docker image rm -f` or pruning the image the tag moved to
+			logger.Debug().Msg("Image not present locally")
+			return false, nil
+		}
 		logger.Err(err).Msg("InspectImage request failed")
 		return false, fmt.Errorf("inspecting image %s failed: %w", named.String(), err)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -378,7 +379,8 @@ func (f *fakeDocker) ImageInspect(ctx context.Context, imageID string, inspectOp
 	}
 	img, ok := f.images[imageID]
 	if !ok {
-		return image.InspectResponse{}, fmt.Errorf("No such image: %s", imageID)
+		// the client reports a 404 this way
+		return image.InspectResponse{}, fmt.Errorf("No such image: %s: %w", imageID, cerrdefs.ErrNotFound)
 	}
 	return img, nil
 }
