@@ -196,7 +196,7 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, containerID string) (
 	base := *c.ContainerJSONBase
 	state := *c.State
 	base.State = &state
-	return container.InspectResponse{ContainerJSONBase: &base, Config: c.Config, NetworkSettings: c.NetworkSettings}, nil
+	return container.InspectResponse{ContainerJSONBase: &base, Mounts: c.Mounts, Config: c.Config, NetworkSettings: c.NetworkSettings}, nil
 }
 
 func (f *fakeDocker) ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error {

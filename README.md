@@ -92,7 +92,7 @@ scanner:
 
 ### Updater
 `stop_timeout` — amount of time in seconds to wait on a container to stop before forcefully killing (default `30`)  
-`remove_volumes` — remove volumes when recreating a container (default `false`)  
+`remove_volumes` — remove the previous container's anonymous volumes that its replacement no longer uses, e.g. for a `VOLUME` the new image dropped (default `false`). Anonymous volumes are otherwise carried over to the replacement like docker compose does, so their data survives the update  
 `remove_images` — remove previous image if it is unused after an update (default `false`)
 
 ```

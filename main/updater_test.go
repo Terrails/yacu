@@ -4,13 +4,19 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/terrails/yacu/types/config"
 	yacucontainer "github.com/terrails/yacu/types/container"
 	"github.com/terrails/yacu/types/database"
@@ -127,6 +133,73 @@ func TestUpdateContainerReplacesContainer(t *testing.T) {
 	}
 	if len(api.containers) != 1 {
 		t.Fatalf("expected the previous container to be removed, have %d containers", len(api.containers))
+	}
+}
+
+func TestUpdateContainerLetsNewImageDefaultsApply(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/app:latest", sha('a'), oldCreated, "test/app@"+sha('1'))
+	oldImage := api.images[sha('a')]
+	oldImage.Config = &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{
+		Env:    []string{"APP_VERSION=1.0"},
+		Labels: map[string]string{"org.opencontainers.image.version": "1.0"},
+	}}
+	api.images[sha('a')] = oldImage
+
+	id := api.addContainer("app", "test/app:latest", map[string]string{"org.opencontainers.image.version": "1.0", "custom": "yes"}, true)
+	// what the daemon made of the user's settings and the old image's defaults
+	old := api.containers[id]
+	old.Config.Hostname = id[:12]
+	old.Config.Env = []string{"TZ=UTC", "APP_VERSION=1.0"}
+	old.NetworkSettings.Networks["bridge"] = &network.EndpointSettings{EndpointID: "old-endpoint", IPAddress: "172.17.0.2", Aliases: []string{id[:12]}}
+
+	app := newTestApp(t, api)
+	cnt := loadContainer(t, app, id)
+	api.addImage("test/app:latest", sha('b'), newCreated, "test/app@"+sha('2'))
+
+	newCnt, _, err := app.UpdateContainer(context.Background(), cnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// the fake daemon stores what it was asked to create as-is
+	created := api.containers[newCnt.ID]
+	if !slices.Equal(created.Config.Env, []string{"TZ=UTC"}) {
+		t.Errorf("created with env %v, want only the user's", created.Config.Env)
+	}
+	if _, ok := created.Config.Labels["org.opencontainers.image.version"]; ok || created.Config.Labels["custom"] != "yes" {
+		t.Errorf("created with labels %v, want only the user's", created.Config.Labels)
+	}
+	if created.Config.Hostname != "" {
+		t.Errorf("created with the previous container's hostname %q", created.Config.Hostname)
+	}
+	if endpoint := created.NetworkSettings.Networks["bridge"]; endpoint.EndpointID != "" || endpoint.IPAddress != "" || len(endpoint.Aliases) != 0 {
+		t.Errorf("created with the previous container's endpoint data %+v", endpoint)
+	}
+}
+
+func TestUpdateContainerKeepsAnonymousVolumes(t *testing.T) {
+	api := newFakeDocker()
+	api.addImage("test/db:latest", sha('a'), oldCreated, "test/db@"+sha('1'))
+	id := api.addContainer("db", "test/db:latest", nil, true)
+	api.containers[id].Config.Volumes = map[string]struct{}{"/var/lib/db": {}}
+	api.containers[id].Mounts = []container.MountPoint{{Type: mount.TypeVolume, Name: "anonymous-db-data", Destination: "/var/lib/db", RW: true}}
+
+	app := newTestApp(t, api)
+	cnt := loadContainer(t, app, id)
+	api.addImage("test/db:latest", sha('b'), newCreated, "test/db@"+sha('2'))
+	newImage := api.images[sha('b')]
+	newImage.Config = &dockerspec.DockerOCIImageConfig{ImageConfig: ocispec.ImageConfig{Volumes: map[string]struct{}{"/var/lib/db": {}}}}
+	api.images[sha('b')] = newImage
+
+	newCnt, _, err := app.UpdateContainer(context.Background(), cnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []mount.Mount{{Type: mount.TypeVolume, Source: "anonymous-db-data", Target: "/var/lib/db"}}
+	if got := api.containers[newCnt.ID].HostConfig.Mounts; !reflect.DeepEqual(got, want) {
+		t.Fatalf("created with mounts %+v, want the previous anonymous volume %+v", got, want)
 	}
 }
 

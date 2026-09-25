@@ -267,8 +267,14 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 		return &updateError{Context: context, Err: err}
 	}
 
+	// what the replacement is created from, already pulled under the container's tag
+	newImage, err := app.Client.ImageInspect(ctx, cnt.Repository.String())
+	if err != nil {
+		logger.Err(err).Msg("ImageInspect request failed")
+		return nil, nil, &updateError{Context: "Unable to inspect image", Err: err}
+	}
+
 	if shouldRestart {
-		var err error
 		dependantContainers, err = app.GetDependingContainers(ctx, cnt.Raw)
 		if err != nil {
 			return nil, nil, &updateError{Context: "Unable to fetch depending containers", Err: err}
@@ -300,8 +306,10 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 		return nil
 	}
 
+	endpoints := cnt.EndpointsConfig()
+
 	var singleNetSettings network.NetworkingConfig = network.NetworkingConfig{}
-	for netName, netSettings := range cnt.Raw.NetworkSettings.Networks {
+	for netName, netSettings := range endpoints {
 		singleNetSettings.EndpointsConfig = map[string]*network.EndpointSettings{
 			netName: netSettings,
 		}
@@ -309,7 +317,7 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 	}
 
 	logger.Debug().Msg("Creating container")
-	response, err := app.Client.ContainerCreate(ctx, cnt.Raw.Config, cnt.Raw.HostConfig, &singleNetSettings, nil, name)
+	response, err := app.Client.ContainerCreate(ctx, cnt.CreateConfig(), cnt.CreateHostConfig(newImage.Config), &singleNetSettings, nil, name)
 	if err != nil {
 		logger.Err(err).Msg("Failed to create container")
 		return nil, nil, fail("Unable to create container", err, renameBack)
@@ -333,12 +341,12 @@ func (app Yacu) UpdateContainer(ctx context.Context, cnt *yacucontainer.Containe
 	if !cnt.Raw.HostConfig.NetworkMode.IsHost() {
 
 		// should be already connected to 1 network
-		if len(cnt.Raw.NetworkSettings.Networks) > 1 {
+		if len(endpoints) > 1 {
 			logger.Debug().Msg("Connecting container to networks")
 		}
 
 		// Add other networks
-		for netName, netSettings := range cnt.Raw.NetworkSettings.Networks {
+		for netName, netSettings := range endpoints {
 
 			// skip already connected
 			if _, ok := singleNetSettings.EndpointsConfig[netName]; ok {
