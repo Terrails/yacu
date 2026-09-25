@@ -6,6 +6,12 @@ A simple program written in Go and available in the form of a docker container c
 
 Put simply. A chosen container will only be updated if it's remote image is older than a set amount of days in order to ensure somewhat stable releases while giving the ability of automatic updates.
 
+## Images
+Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/terrails/yacu`:
+
+* `latest` — built from the `master` branch
+* `stable` — the latest release, also published under its version (e.g. `1.2.3`, `1.2` and `1`)
+
 ## Configuration
 A config file is optional but highly recommended.  
 
