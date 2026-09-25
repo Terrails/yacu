@@ -4,13 +4,29 @@
 
 A simple program written in Go and available in the form of a docker container capable of updating docker containers based on the age of the latest image.
 
-Put simply. A chosen container will only be updated if it's remote image is older than a set amount of days in order to ensure somewhat stable releases while giving the ability of automatic updates.
+Put simply. A chosen container will only be updated if its remote image is older than a set amount of days in order to ensure somewhat stable releases while giving the ability of automatic updates.
 
 ## Images
 Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/terrails/yacu`:
 
 * `latest` — built from the `master` branch
 * `stable` — the latest release, also published under its version (e.g. `1.2.3`, `1.2` and `1`)
+
+yacu needs the Docker socket to manage containers, and keeps its config, database and logs in `/data`. With compose:
+
+```
+services:
+  yacu:
+    image: ghcr.io/terrails/yacu:stable
+    restart: unless-stopped
+    # time to finish an update in progress when stopped, see Stopping
+    stop_grace_period: 2m
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./yacu:/data
+```
+
+Only containers with the `yacu.enable=true` label are updated, unless `scanner.scan_all` is enabled (see Labels).
 
 ## Configuration
 A config file is optional but highly recommended.  
@@ -20,13 +36,6 @@ YACU searches for a `yacu.yaml` config file in current working directory or uses
 In case of the docker container, `yacu.yaml` should be mounted in `/data` path of the container
 
 To check for updates and apply them just once, e.g. from your own scheduler or while trying out a configuration, run yacu with `--once`. It exits when done, with exit code `1` if a container could not be checked or updated.
-
-### Stopping
-When stopped (`SIGTERM`/`SIGINT`), yacu stops scanning and pulling right away, but a container update that is already in progress is always completed or rolled back first. Remaining updates are skipped until the next run. Sending the signal a second time exits immediately.
-
-Containers that depend on the updated one (compose `depends_on` with `service_healthy` or `service_completed_successfully`) and are still waiting for that condition at shutdown are left stopped rather than started early, and a warning is sent. Start them manually once the dependency is ready.
-
-Docker only waits 10 seconds before killing a container, which may not be enough to stop, recreate and start the container being updated. Give yacu more time, e.g. `stop_grace_period: 2m` in compose or `docker run --stop-timeout 120`.
 
 File examples can be viewed in `examples/config` folder in this repository.
 
@@ -60,7 +69,7 @@ For example, `YACU_SCANNER_IMAGE_AGE=14` overrides `scanner.image_age: 7`.
 
 ---
 ### Database
-`path` — path to sqlite database where creation and last check dates for each container are stored (default `data.db`)
+`path` — path to the sqlite database storing what the registry was last found to have for each image (default `data.db`)
 
 ```
 database:
@@ -171,10 +180,21 @@ webhooks:
       url:      webui_url
       icon_url: author_icon_url
     kind:
-      critical_errors:      true
-      container_fail:       true
-      container_success:    true
+      errors:             true
+      image_success:      true
+      container_success:  true
 ```
+
+Notifications of an updated container link to its web UI when it has Unraid's `net.unraid.docker.webui` label set to a full URL. Unraid's templates like `http://[IP]:[PORT:8080]/` are left out, as Discord rejects them.
+
+## Containers depending on others
+When a container is updated, the running containers that depend on it through compose's `depends_on` are stopped first and started again once it is updated, following their condition:
+
+* `service_started` — right after it starts
+* `service_healthy` — once it is healthy, or right away without a healthcheck. A container still not healthy after 5 minutes, or becoming unhealthy, is left stopped with a warning
+* `service_completed_successfully` — once it exits, with a warning if it failed. A container still waiting after 5 minutes is left stopped with a warning
+
+Dependencies declared with `restart: false` are not stopped. The containers are found through the `com.docker.compose.depends_on` label, which compose sets. Outside of compose it can be set by hand, with container names in place of services, e.g. `db:service_started` (a missing condition means `service_healthy`).
 
 ## Containers sharing a network
 Containers joining the network (or IPC/PID) namespace of an updated container, e.g. apps behind a VPN container with `network_mode: "service:gluetun"` in compose or `--network container:gluetun`, are stopped with it and afterwards join its replacement. Compose references the container by ID, so those containers are recreated from the image they run. If their image tag meanwhile refers to a different image, they are left stopped with a warning instead, so that they are not updated along with it; recreate them yourself, e.g. with `docker compose up -d`.
@@ -186,3 +206,10 @@ Containers that share only the IPC or PID namespace are found through compose's 
 `yacu.enable` — allow/disallow yacu from scanning the container, bypasses `scanner.scan_all` [`true`, `false`]  
 `yacu.image_age` — minimum time in days that an image should be released for before pulling and recreating the container, used to bypass `scanner.image_age`  
 `yacu.stop_timeout` — amount of time in seconds to wait for a container to stop before forcefully killing it, used to bypass `updater.stop_timeout` 
+
+## Stopping
+When stopped (`SIGTERM`/`SIGINT`), yacu stops scanning and pulling right away, but a container update that is already in progress is always completed or rolled back first. Remaining updates are skipped until the next run. Sending the signal a second time exits immediately.
+
+Containers that depend on the updated one (compose `depends_on` with `service_healthy` or `service_completed_successfully`) and are still waiting for that condition at shutdown are left stopped rather than started early, and a warning is sent. Start them manually once the dependency is ready.
+
+Docker only waits 10 seconds before killing a container, which may not be enough to stop, recreate and start the container being updated. Give yacu more time, e.g. `stop_grace_period: 2m` in compose or `docker run --stop-timeout 120`.

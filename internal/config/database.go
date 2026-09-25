@@ -14,7 +14,7 @@ type DatabaseConfig struct {
 
 func (c DatabaseConfig) LoadDatabase(ctx context.Context) (*database.Database, error) {
 	if len(strings.TrimSpace(c.Path)) == 0 {
-		c.Path = "yacu.db"
+		c.Path = GetDefaultConfig().Database.Path
 	}
 
 	logger := zerolog.Ctx(ctx).With().Str("service", "database").Str("path", c.Path).Logger()

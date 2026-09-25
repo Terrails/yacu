@@ -1,8 +1,10 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -188,5 +190,46 @@ func TestExampleConfigsOnlyUseKnownFields(t *testing.T) {
 				t.Fatalf("example does not match the config: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadDatabaseDefaultsEmptyPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	db, err := DatabaseConfig{Path: " "}.LoadDatabase(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if _, err := os.Stat("data.db"); err != nil {
+		t.Fatalf("expected the default data.db to be used: %v", err)
+	}
+}
+
+func TestReadmeConfigExamplesOnlyUseKnownFields(t *testing.T) {
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// the code blocks that are yacu configuration, recognized by their top-level key
+	sections := regexp.MustCompile(`^(database|logging|scanner|updater|registries|webhooks):`)
+	blocks := regexp.MustCompile("(?s)```\\n(.*?)```").FindAllStringSubmatch(string(readme), -1)
+	checked := 0
+	for _, block := range blocks {
+		if !sections.MatchString(block[1]) {
+			continue
+		}
+		checked++
+
+		decoder := yaml.NewDecoder(strings.NewReader(block[1]))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(GetDefaultConfig()); err != nil {
+			t.Errorf("README example does not match the config: %v\n%s", err, block[1])
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no configuration examples found in the README")
 	}
 }

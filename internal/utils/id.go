@@ -4,12 +4,13 @@ import (
 	"strings"
 )
 
+// the first 12 characters of an ID without its algorithm, as docker shows them
 func ShortId(longId string) string {
-	if strings.Contains(longId, ":") {
-		return strings.Split(longId, ":")[1][:12]
-	} else {
-		return longId[:12]
+	id := IdEncoded(longId)
+	if len(id) > 12 {
+		return id[:12]
 	}
+	return id
 }
 
 // returns an id without algorithm part

@@ -31,3 +31,18 @@ func TestGetRepoDigestMissing(t *testing.T) {
 		t.Fatalf("expected ErrMissingRepoDigest, got %v", err)
 	}
 }
+
+func TestShortId(t *testing.T) {
+	tests := map[string]string{
+		"sha256:0d17b565c37bcbd895e9d92315a05c1c3c9a29f762b011a10c54a66cd53c9b31": "0d17b565c37b",
+		"0d17b565c37bcbd895e9d92315a05c1c3c9a29f762b011a10c54a66cd53c9b31":        "0d17b565c37b",
+		"sha256:0d17b5": "0d17b5",
+		"0d17b5":        "0d17b5",
+		"":              "",
+	}
+	for id, want := range tests {
+		if got := ShortId(id); got != want {
+			t.Errorf("ShortId(%q) = %q, want %q", id, got, want)
+		}
+	}
+}
