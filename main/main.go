@@ -12,11 +12,12 @@ import (
 	"github.com/adhocore/gronx"
 	"github.com/docker/docker/client"
 	"github.com/rs/zerolog/log"
-	"github.com/terrails/yacu/types/config"
-	"github.com/terrails/yacu/types/docker"
-	"github.com/terrails/yacu/types/webhook"
-	webhooks "github.com/terrails/yacu/types/webhook/impl"
-	"github.com/terrails/yacu/utils"
+	"github.com/terrails/yacu/internal/config"
+	"github.com/terrails/yacu/internal/docker"
+	"github.com/terrails/yacu/internal/updater"
+	"github.com/terrails/yacu/internal/utils"
+	"github.com/terrails/yacu/internal/webhook"
+	webhooks "github.com/terrails/yacu/internal/webhook/impl"
 )
 
 // how long a single Docker Engine API call may take
@@ -66,7 +67,7 @@ func run() int {
 	defer database.Close()
 	logger.Debug().Msg("local database initialized")
 
-	yacu := Yacu{
+	yacu := updater.Yacu{
 		Client:     docker.WithTimeouts(client, dockerCallTimeout),
 		Webhooks:   webhook.NewWebhookHandler(),
 		DB:         *database,

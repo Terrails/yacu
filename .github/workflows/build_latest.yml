@@ -7,8 +7,7 @@ on:
     paths:
       - .github/workflows/build_latest.yml
       - main/**
-      - types/**
-      - utils/**
+      - internal/**
       - Dockerfile
       - go.mod
       - go.sum
