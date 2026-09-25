@@ -4,7 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/mattn/go-sqlite3"
+	// pure Go, so that yacu builds without cgo
+	_ "modernc.org/sqlite"
 )
 
 type Database struct {
@@ -26,7 +27,7 @@ var migrations = []string{
 
 // Opens (creating if needed) the sqlite database at path and brings its schema up to date.
 func Open(path string) (*Database, error) {
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
