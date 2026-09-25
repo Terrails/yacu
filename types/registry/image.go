@@ -38,8 +38,11 @@ func GetImageDataFromRegistry(ctx context.Context, entries *config.RegistryEntri
 		return nil, fmt.Errorf("parsing image name failed: %w", err)
 	}
 
-	domain := reference.Domain(named)
-	sysCtx := entries.GetSystemContextFor(domain)
+	sysCtx, err := entries.GetSystemContextFor(named)
+	if err != nil {
+		logger.Err(err).Msg("resolving registry credentials failed")
+		return nil, err
+	}
 
 	src, err := ref.NewImageSource(ctx, sysCtx)
 	if err != nil {

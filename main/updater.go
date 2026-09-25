@@ -703,12 +703,20 @@ func (app Yacu) PullImage(ctx context.Context, repository reference.NamedTagged)
 	ctx, cancel := context.WithTimeout(ctx, pullTimeout)
 	defer cancel()
 
+	// the daemon does not read any client configuration, credentials are passed along with the pull
+	credentials, err := app.Registries.GetCredentials(repository)
+	if err != nil {
+		logger.Err(err).Msg("Resolving registry credentials failed")
+		return err
+	}
+
 	pullOptions := image.PullOptions{}
-	if authEntry := app.Registries.GetAuthConfigFor(reference.Domain(repository)); authEntry != nil {
+	if len(credentials.Username) > 0 || len(credentials.Password) > 0 || len(credentials.IdentityToken) > 0 {
 		auth, err := registry.EncodeAuthConfig(
 			registry.AuthConfig{
-				Username: authEntry.Username,
-				Password: authEntry.Password,
+				Username:      credentials.Username,
+				Password:      credentials.Password,
+				IdentityToken: credentials.IdentityToken,
 			},
 		)
 

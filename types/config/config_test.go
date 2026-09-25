@@ -68,3 +68,20 @@ func TestLoadConfigRejectsIntervalThatNeverFires(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigReadsRegistryPasswords(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "yacu.yaml")
+	configFile := []byte("registries:\n  - domain: ghcr.io\n    username: owner\n    password_env: YACU_TEST_GHCR_TOKEN\n")
+	if err := os.WriteFile(configPath, configFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YACU_TEST_GHCR_TOKEN", "token")
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Registries[0].Password != "token" {
+		t.Fatalf("password was not read from the environment: %+v", config.Registries[0])
+	}
+}

@@ -27,6 +27,7 @@ type fakeDocker struct {
 	tags       map[string]string                     // reference -> image ID
 	pulls      map[string]string                     // reference -> image ID the tag points to after a pull
 	pullBody   map[string]string                     // reference -> pull progress stream
+	pullAuth   map[string]string                     // reference -> registry auth the last pull was made with
 
 	// fail, when set, is consulted before every call; a non-nil result is returned as the call's error
 	fail func(method, id string) error
@@ -44,6 +45,7 @@ func newFakeDocker() *fakeDocker {
 		tags:       map[string]string{},
 		pulls:      map[string]string{},
 		pullBody:   map[string]string{},
+		pullAuth:   map[string]string{},
 	}
 }
 
@@ -354,6 +356,7 @@ func (f *fakeDocker) ImagePull(ctx context.Context, refStr string, options image
 	}
 
 	ref := normalize(refStr)
+	f.pullAuth[ref] = options.RegistryAuth
 	body, ok := f.pullBody[ref]
 	if !ok {
 		body = `{"status":"Pulling from test"}` + "\n" + `{"status":"Status: Downloaded newer image"}` + "\n"

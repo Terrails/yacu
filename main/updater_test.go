@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -14,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/registry"
 	dockerspec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -549,5 +552,51 @@ func TestPullImagesFailsOnInspectErrors(t *testing.T) {
 	}
 	if hook.errors != 1 {
 		t.Fatalf("%d error notifications sent, want 1", hook.errors)
+	}
+}
+
+func TestPullImageSendsRegistryCredentials(t *testing.T) {
+	// no credentials from the host
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("REGISTRY_AUTH_FILE", "")
+	t.Setenv("DOCKER_CONFIG", home)
+	// stored by `docker login ghcr.io`
+	stored := `{"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("stored-user:stored-token")) + `"}}}`
+	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(stored), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	api := newFakeDocker()
+	app := newTestApp(t, api)
+	app.Registries = config.RegistryEntries{{Domain: "https://index.docker.io/v1/", Username: "hub-user", Password: "hub-token"}}
+
+	tests := []struct{ ref, wantUser string }{
+		{"test/app:latest", "hub-user"},
+		{"ghcr.io/owner/app:latest", "stored-user"},
+		{"quay.io/owner/app:latest", ""},
+	}
+	for _, test := range tests {
+		named, _ := reference.ParseNormalizedNamed(test.ref)
+		if err := app.PullImage(context.Background(), named.(reference.NamedTagged)); err != nil {
+			t.Fatal(err)
+		}
+
+		auth := api.pullAuth[normalize(test.ref)]
+		if len(test.wantUser) == 0 {
+			if len(auth) > 0 {
+				t.Errorf("%s was pulled with credentials although there are none", test.ref)
+			}
+			continue
+		}
+		decoded, err := registry.DecodeAuthConfig(auth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Username != test.wantUser {
+			t.Errorf("%s was pulled as %q, want %q", test.ref, decoded.Username, test.wantUser)
+		}
 	}
 }

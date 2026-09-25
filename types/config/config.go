@@ -59,6 +59,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err := config.ApplyEnvironment(); err != nil {
 		return nil, err
 	}
+	if err := config.Registries.LoadPasswords(); err != nil {
+		return nil, err
+	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}

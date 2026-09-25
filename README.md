@@ -105,21 +105,30 @@ updater:
 ### Registry authentication
 An array of registry authentication data, with each containing the following:  
 
-`domain` — registry domain that needs authentication  
+`domain` — registry domain that needs authentication, e.g. `ghcr.io`. Docker Hub can be given as `docker.io`, `index.docker.io`, `registry-1.docker.io` or `https://index.docker.io/v1/`  
 `username` — username for auth  
-`password` — password for the above username on registry  
-`insecure` — authenticate insecurely in case of local registries not using HTTPS (default `false`)
+`password` — password (or access token) for the above username on registry  
+`password_file` — file to read the password from instead, e.g. a docker secret like `/run/secrets/ghcr_token`  
+`password_env` — environment variable to read the password from instead  
+`insecure` — authenticate insecurely in case of local registries not using HTTPS (default `false`). Pulls are done by the Docker daemon, which needs the registry in its own `insecure-registries` as well
+
+Only one of `password`, `password_file` and `password_env` can be given per registry.
 
 ```
 registries:
   - domain:     docker.io
     username:   123
     password:   123
+  - domain:         ghcr.io
+    username:       owner
+    password_file:  /run/secrets/ghcr_token
   - domain:     custom_registry.tld
     username:   321
-    password:   321
+    password_env: CUSTOM_REGISTRY_PASSWORD
     insecure:   true
 ```
+
+Registries without credentials here use the ones stored by `docker login`, read from the Docker config file. In the container that is `/root/.docker/config.json`, or `config.json` in the directory set in `DOCKER_CONFIG`, e.g. by mounting the host's `~/.docker/config.json` read-only. Credentials kept by a credential helper (`credsStore`/`credHelpers` in that file) need the helper's `docker-credential-*` program, which the yacu image does not include.
 
 ### Webhooks
 A way to send notifications on each successful or failed update  
