@@ -30,6 +30,7 @@ func main() {
 // deferred cleanup runs before exiting
 func run() int {
 	configPathPtr := flag.String("config", "yacu.yaml", "Path to config file. By default checks for 'yacu.yaml' in current directory.")
+	oncePtr := flag.Bool("once", false, "Check for updates and apply them once, then exit instead of running on scanner.interval. Exits with 1 if anything failed.")
 	flag.Parse()
 
 	config, err := config.LoadConfig(*configPathPtr)
@@ -98,6 +99,25 @@ func run() int {
 	}
 
 	logger.Info().Msg("initialization completed")
+
+	if *oncePtr {
+		failures := yacu.Run(ctx)
+		if ctx.Err() != nil {
+			<-shutdownLogged
+			logger.Info().Msg("shut down")
+			return 1
+		}
+		if failures > 0 {
+			logger.Error().Int("failures", failures).Msg("some containers could not be checked or updated")
+			return 1
+		}
+		return 0
+	}
+
+	if config.Scanner.RunOnStart {
+		logger.Info().Msg("checking for updates on start (scanner.run_on_start)")
+		yacu.Run(ctx)
+	}
 
 	for {
 		nextTime, err := gronx.NextTick(config.Scanner.Interval, false)

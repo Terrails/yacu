@@ -396,7 +396,9 @@ func TestApplyUpdatesSkipsOnlyContainersWhoseImageFailed(t *testing.T) {
 	api.pullResult("test/b:latest", sha('c'))
 
 	containers := yacucontainer.Containers{loadContainer(t, app, aID), loadContainer(t, app, bID)}
-	app.ApplyUpdates(context.Background(), containers)
+	if failures := app.ApplyUpdates(context.Background(), containers); failures != 1 {
+		t.Fatalf("%d failures reported, want 1 for container a", failures)
+	}
 
 	assertRunning(t, api, "a", aID)
 	b := api.byName("b")
@@ -475,6 +477,10 @@ func TestFetchUpdatesRetriesFailedChecks(t *testing.T) {
 	api.fail = failWhen("ContainerInspect", func(string) bool { return true })
 	if _, errs := app.FetchUpdates(context.Background()); len(errs) != 1 {
 		t.Fatalf("expected one error after exhausting retries, got %v", errs)
+	}
+	api.calls = nil
+	if failures := app.Run(context.Background()); failures != 1 {
+		t.Fatalf("%d failures reported, want 1 for the container that could not be checked", failures)
 	}
 	if got := api.called("ContainerInspect", id); got != scanAttempts {
 		t.Fatalf("container inspected %d times, want %d", got, scanAttempts)

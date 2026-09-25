@@ -13,6 +13,8 @@ YACU searches for a `yacu.yaml` config file in current working directory or uses
 
 In case of the docker container, `yacu.yaml` should be mounted in `/data` path of the container
 
+To check for updates and apply them just once, e.g. from your own scheduler or while trying out a configuration, run yacu with `--once`. It exits when done, with exit code `1` if a container could not be checked or updated.
+
 ### Stopping
 When stopped (`SIGTERM`/`SIGINT`), yacu stops scanning and pulling right away, but a container update that is already in progress is always completed or rolled back first. Remaining updates are skipped until the next run. Sending the signal a second time exits immediately.
 
@@ -38,6 +40,8 @@ YACU_LOGGING_FILE_DIRECTORY
 YACU_LOGGING_FILE_LEVEL
 YACU_SCANNER_INTERVAL
 YACU_SCANNER_IMAGE_AGE
+YACU_SCANNER_CHECK_INTERVAL
+YACU_SCANNER_RUN_ON_START
 YACU_SCANNER_SCAN_ALL
 YACU_SCANNER_SCAN_STOPPED
 YACU_SCANNER_FAIL_ON_ERROR
@@ -77,17 +81,21 @@ logging:
 ### Scanner
 `interval` — an interval using cron format (default `@weekly`)  
 `image_age` — how old an image should be in days before pulling and updating container (default `7`)  
+`check_interval` — hours during which the last registry check of an image is relied on instead of querying the registry again, `0` queries it on every run (default `24`). Keeps frequent runs within registry rate limits, e.g. Docker Hub counts each check as a pull. An update found is always confirmed with the registry first  
+`run_on_start` — also check for updates right when yacu starts instead of only on `interval` (default `false`)  
 `scan_all` — scan all containers on device unless explicitly disabled using `yacu.enable` label (default `false`)  
 `scan_stopped` — scan an eligible container even if it is not running (default `false`)  
 `fail_on_error` — skip applying any updates in a run where checking a container failed, instead of updating the containers that were checked successfully (default `false`)
 
 ```
 scanner:
-  interval:      "@weekly"
-  image_age:     7
-  scan_all:      false
-  scan_stopped:  false
-  fail_on_error: false
+  interval:       "@weekly"
+  image_age:      7
+  check_interval: 24
+  run_on_start:   false
+  scan_all:       false
+  scan_stopped:   false
+  fail_on_error:  false
 ```
 
 ### Updater

@@ -11,6 +11,8 @@ logging:
 scanner:
   interval:     "@weekly"
   image_age:    7
+  check_interval: 24
+  run_on_start: false
   scan_all:     false
   scan_stopped: false
   fail_on_error: false

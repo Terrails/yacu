@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
+	"github.com/opencontainers/go-digest"
 	"github.com/rs/zerolog"
 	"github.com/terrails/yacu/types/config"
 	"github.com/terrails/yacu/types/database"
@@ -54,6 +55,9 @@ type Yacu struct {
 	Scanner    config.Scanner
 	Updater    config.Updater
 	Registries config.RegistryEntries
+
+	// looks up images in their registry, GetImageDataFromRegistry when nil
+	RegistryLookup func(ctx context.Context, entries *config.RegistryEntries, named reference.Named) (*yacuregistry.ImageData, error)
 }
 
 // A failed step of an image or container update. Context names the step that failed.
@@ -65,14 +69,16 @@ type updateError struct {
 func (e *updateError) Error() string { return fmt.Sprintf("%s: %v", e.Context, e.Err) }
 func (e *updateError) Unwrap() error { return e.Err }
 
-func (app Yacu) Run(ctx context.Context) {
+// Checks for updates and applies them, returning how many containers failed to
+// be checked or updated.
+func (app Yacu) Run(ctx context.Context) (failures int) {
 	logger := zerolog.Ctx(ctx)
 
 	containers, errs := app.FetchUpdates(ctx)
 	if ctx.Err() != nil {
 		// errors caused by the interruption are not worth reporting
 		logger.Info().Msg("Shutting down, scan interrupted")
-		return
+		return 0
 	}
 
 	if len(errs) > 0 {
@@ -83,12 +89,12 @@ func (app Yacu) Run(ctx context.Context) {
 
 		if app.Scanner.FailOnError {
 			logger.Error().Msg("Not applying updates because scanning failed (scanner.fail_on_error)")
-			return
+			return len(errs)
 		}
 	}
 
 	if containers == nil {
-		return
+		return len(errs)
 	}
 
 	if len(containers) == 0 {
@@ -97,13 +103,13 @@ func (app Yacu) Run(ctx context.Context) {
 		logger.Info().Int("count", len(containers)).Msg("Found new updates")
 	}
 
-	app.ApplyUpdates(ctx, containers)
+	return len(errs) + app.ApplyUpdates(ctx, containers)
 }
 
-// Pulls the new images and recreates the given containers.
+// Pulls the new images and recreates the given containers, returning how many were not updated.
 // A container is skipped when its image could not be pulled.
 // On shutdown (ctx cancelled) an update in progress is completed, the remaining ones are skipped.
-func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Containers) {
+func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Containers) (failures int) {
 	logger := zerolog.Ctx(ctx)
 
 	failedImages := app.PullImages(ctx, containers)
@@ -165,6 +171,7 @@ func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Conta
 		count := app.RemoveUnusedImages(ctx, maps.Values(imgToRemove.Items)...)
 		logger.Info().Int("count", count).Msg("Removed unused images")
 	}
+	return len(containers) - successCount
 }
 
 // Pulls the new image of every container.
@@ -553,6 +560,12 @@ func (app Yacu) CheckIfContainerIsUpdateable(ctx context.Context, c *container.S
 	return nil, nil
 }
 
+// Whether the registry has a newer image under the container's tag that is old enough to update to.
+//
+// What the registry was last found to have is stored and relied on for
+// scanner.check_interval hours to rule an update out without querying it again.
+// An update is always confirmed with the registry though, as pulling gets
+// whatever the tag refers to by then.
 func (app Yacu) IsRemotePullable(ctx context.Context, container *yacucontainer.Container) (bool, error) {
 	logger := zerolog.Ctx(ctx).With().
 		Str("container", container.Name).
@@ -562,92 +575,53 @@ func (app Yacu) IsRemotePullable(ctx context.Context, container *yacucontainer.C
 
 	familiarNameTagged := container.RepositoryFamiliarized()
 
+	// whether the registry's image is one to update to
+	isUpdate := func(created time.Time, digest digest.Digest) bool {
+		return utils.DaysPassed(created) >= container.MinImageAge && !container.HasRepoDigest(digest)
+	}
+
 	dbImage, err := app.DB.GetRemoteImageFromName(familiarNameTagged)
-	if err != nil {
-		// image data not present
-		if errors.Is(err, sql.ErrNoRows) {
-			// fetch data from registry
-			remoteData, err := yacuregistry.GetImageDataFromRegistry(ctx, &app.Registries, container.Repository)
-			if err != nil {
-				return false, err
-			}
-
-			// write data to local database
-			if _, err := app.DB.SaveRemoteImage(
-				familiarNameTagged,
-				reference.Domain(container.Repository),
-				*remoteData.Created,
-				remoteData.Digest,
-			); err != nil {
-				logger.Err(err).Msg("Writing remote image data to local database failed")
-				return false, fmt.Errorf("writing remote image data (%s) to local database failed: %w", familiarNameTagged, err)
-			}
-
-			// recheck if container is old enough
-			if utils.DaysPassed(*remoteData.Created) < container.MinImageAge {
-				logger.Debug().Msg("Image up to date")
-				return false, nil
-			}
-
-			// check if remote and local images are different
-			if container.HasRepoDigest(remoteData.Digest) {
-				return false, nil
-			}
-
-			// outdated
-			logger.Debug().Msg("Image added to update queue")
-			return true, nil
-		} else {
-			// unknown SQL error
-			logger.Err(err).Msg("Fetching remote image data from local database failed")
-			return false, fmt.Errorf("fetching remote image data (%s) from local database failed: %w", familiarNameTagged, err)
-		}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		logger.Err(err).Msg("Fetching remote image data from local database failed")
+		return false, fmt.Errorf("fetching remote image data (%s) from local database failed: %w", familiarNameTagged, err)
 	}
 
-	// check if image data in database is old enough
-	if utils.DaysPassed(dbImage.Created) < container.MinImageAge {
-		logger.Debug().Msg("Image up to date")
+	checkInterval := time.Duration(app.Scanner.CheckInterval) * time.Hour
+	if dbImage != nil && time.Since(dbImage.LastCheck) < checkInterval && !isUpdate(dbImage.Created, dbImage.Digest) {
+		logger.Debug().Time("last_check", dbImage.LastCheck).Msg("Image up to date as of the last registry check")
 		return false, nil
 	}
 
-	// last check should have been done at least an interval enough ago
-	if utils.DaysPassed(dbImage.LastCheck) < container.MinImageAge {
-		logger.Debug().Msg("Image up to date")
-		return false, nil
-	}
-
-	// fetch new data from registry
-	remoteData, err := yacuregistry.GetImageDataFromRegistry(ctx, &app.Registries, container.Repository)
+	remoteData, err := app.lookupRemote(ctx, container.Repository)
 	if err != nil {
 		return false, err
 	}
 
-	// write new data to db
-	if err := app.DB.UpdateRemoteImage(dbImage.RowId, remoteData.Created, &remoteData.Digest); err != nil {
+	if _, err := app.DB.SaveRemoteImage(
+		familiarNameTagged,
+		reference.Domain(container.Repository),
+		*remoteData.Created,
+		remoteData.Digest,
+	); err != nil {
 		logger.Err(err).Msg("Writing remote image data to local database failed")
 		return false, fmt.Errorf("writing remote image data (%s) to local database failed: %w", familiarNameTagged, err)
 	}
 
-	// recheck if image is old enough to pull
-	if utils.DaysPassed(*remoteData.Created) < container.MinImageAge {
+	if !isUpdate(*remoteData.Created, remoteData.Digest) {
 		logger.Debug().Msg("Image up to date")
 		return false, nil
 	}
 
-	// update last check time
-	if err := app.DB.UpdateRemoteImageCheck(dbImage.RowId); err != nil {
-		logger.Err(err).Msg("Updating remote image data in local database failed")
-		return false, fmt.Errorf("updating remote image data (%s) in local database failed: %w", familiarNameTagged, err)
-	}
-
-	// check if remote and local images are different
-	if container.HasRepoDigest(remoteData.Digest) {
-		return false, nil
-	}
-
-	// outdated
 	logger.Debug().Msg("Image added to update queue")
 	return true, nil
+}
+
+// the image the registry has under named's tag
+func (app Yacu) lookupRemote(ctx context.Context, named reference.Named) (*yacuregistry.ImageData, error) {
+	if app.RegistryLookup != nil {
+		return app.RegistryLookup(ctx, &app.Registries, named)
+	}
+	return yacuregistry.GetImageDataFromRegistry(ctx, &app.Registries, named)
 }
 
 func (app Yacu) IsLatestImagePresent(ctx context.Context, named reference.NamedTagged) (bool, error) {

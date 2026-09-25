@@ -85,3 +85,27 @@ func TestLoadConfigReadsRegistryPasswords(t *testing.T) {
 		t.Fatalf("password was not read from the environment: %+v", config.Registries[0])
 	}
 }
+
+func TestLoadConfigSchedulingOptions(t *testing.T) {
+	config, err := LoadConfig(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Scanner.CheckInterval != 24 || config.Scanner.RunOnStart {
+		t.Fatalf("unexpected defaults: %+v", config.Scanner)
+	}
+
+	t.Setenv("YACU_SCANNER_CHECK_INTERVAL", "6")
+	t.Setenv("YACU_SCANNER_RUN_ON_START", "true")
+	if config, err = LoadConfig(filepath.Join(t.TempDir(), "missing.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if config.Scanner.CheckInterval != 6 || !config.Scanner.RunOnStart {
+		t.Fatalf("environment values did not apply: %+v", config.Scanner)
+	}
+
+	t.Setenv("YACU_SCANNER_CHECK_INTERVAL", "-1")
+	if _, err := LoadConfig(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+		t.Fatal("expected a negative check interval to be rejected")
+	}
+}

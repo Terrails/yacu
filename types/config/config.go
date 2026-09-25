@@ -34,11 +34,13 @@ func GetDefaultConfig() *Config {
 			},
 		},
 		Scanner: Scanner{
-			Interval:    "@weekly",
-			ImageAge:    7,
-			ScanAll:     false,
-			ScanStopped: false,
-			FailOnError: false,
+			Interval:      "@weekly",
+			ImageAge:      7,
+			CheckInterval: 24,
+			RunOnStart:    false,
+			ScanAll:       false,
+			ScanStopped:   false,
+			FailOnError:   false,
 		},
 		Updater: Updater{
 			StopTimeout:   30,
@@ -128,6 +130,20 @@ func (c *Config) ApplyEnvironment() error {
 		}
 		c.Scanner.ImageAge = parsed
 	}
+	if value, ok := os.LookupEnv("YACU_SCANNER_CHECK_INTERVAL"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("YACU_SCANNER_CHECK_INTERVAL must be an integer: %w", err)
+		}
+		c.Scanner.CheckInterval = parsed
+	}
+	if value, ok := os.LookupEnv("YACU_SCANNER_RUN_ON_START"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("YACU_SCANNER_RUN_ON_START must be a boolean: %w", err)
+		}
+		c.Scanner.RunOnStart = parsed
+	}
 	if value, ok := os.LookupEnv("YACU_SCANNER_SCAN_ALL"); ok {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -175,5 +191,8 @@ func (c *Config) ApplyEnvironment() error {
 }
 
 func (c Config) Validate() error {
+	if c.Scanner.CheckInterval < 0 {
+		return fmt.Errorf("scanner.check_interval cannot be negative: %d", c.Scanner.CheckInterval)
+	}
 	return c.Scanner.ValidateInterval()
 }

@@ -80,18 +80,3 @@ func (d Database) SaveRemoteImage(name string, domain string, created time.Time,
 
 	return &id, nil
 }
-
-func (d Database) UpdateRemoteImage(rowid int64, created *time.Time, digest *digest.Digest) error {
-	rcreated := created.UTC().Format(time.RFC3339Nano)
-	rdigest := digest.String()
-
-	_, err := d.DB.Exec("UPDATE remote_images SET created=?, digest=? WHERE id=?", rcreated, rdigest, rowid)
-	return err
-}
-
-func (d Database) UpdateRemoteImageCheck(rowid int64) error {
-	lastCheck := time.Now().UTC().Format(time.RFC3339Nano)
-
-	_, err := d.DB.Exec("UPDATE remote_images SET last_check=? WHERE id=?", lastCheck, rowid)
-	return err
-}
