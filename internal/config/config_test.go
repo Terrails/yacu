@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadConfigEnvironmentOverridesFile(t *testing.T) {
@@ -107,5 +110,83 @@ func TestLoadConfigSchedulingOptions(t *testing.T) {
 	t.Setenv("YACU_SCANNER_CHECK_INTERVAL", "-1")
 	if _, err := LoadConfig(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Fatal("expected a negative check interval to be rejected")
+	}
+}
+
+func TestLoadConfigFileOverridesDefaults(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "yacu.yaml")
+	configFile := []byte(`database:
+  path: /data/yacu.db
+logging:
+  console:
+    level: warn
+scanner:
+  interval: "@daily"
+updater:
+  stop_timeout: 60
+  remove_images: true
+`)
+	if err := os.WriteFile(configPath, configFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Database.Path != "/data/yacu.db" || config.Logging.Console.Level != zerolog.WarnLevel ||
+		config.Scanner.Interval != "@daily" || config.Updater.StopTimeout != 60 || !config.Updater.RemoveImages {
+		t.Fatalf("file values did not override defaults: %+v", config)
+	}
+	// unset in the file, so still the defaults
+	if config.Logging.File.Level != zerolog.DebugLevel || config.Scanner.ImageAge != 7 || config.Updater.RemoveVolumes {
+		t.Fatalf("defaults not kept for values missing from the file: %+v", config)
+	}
+}
+
+func TestLoadConfigWebhookKindDefaults(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "yacu.yaml")
+	configFile := []byte(`webhooks:
+  discord:
+    url: https://discord.example/webhook
+    kind:
+      errors: false
+`)
+	if err := os.WriteFile(configPath, configFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kind := config.Webhooks["discord"].Kind
+	if kind.Errors == nil || *kind.Errors {
+		t.Error("errors set to false in the file was not kept")
+	}
+	if kind.ImageSuccess == nil || !*kind.ImageSuccess || kind.ContainerSuccess == nil || !*kind.ContainerSuccess {
+		t.Errorf("kinds missing from the file are not enabled: %+v", kind)
+	}
+}
+
+func TestExampleConfigsOnlyUseKnownFields(t *testing.T) {
+	examples, err := filepath.Glob("../../examples/config/*.yaml")
+	if err != nil || len(examples) == 0 {
+		t.Fatalf("no example configs found: %v", err)
+	}
+	for _, example := range examples {
+		t.Run(filepath.Base(example), func(t *testing.T) {
+			file, err := os.Open(example)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+
+			decoder := yaml.NewDecoder(file)
+			decoder.KnownFields(true)
+			if err := decoder.Decode(GetDefaultConfig()); err != nil {
+				t.Fatalf("example does not match the config: %v", err)
+			}
+		})
 	}
 }

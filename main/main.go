@@ -82,17 +82,6 @@ func run() int {
 			if err != nil {
 				logger.Err(err).Msg("setting up discord webhook client failed")
 			} else {
-				defVal := true
-				if val.Kind.Errors == nil {
-					val.Kind.Errors = &defVal
-				}
-				if val.Kind.ImageSuccess == nil {
-					val.Kind.ImageSuccess = &defVal
-				}
-				if val.Kind.ContainerSuccess == nil {
-					val.Kind.ContainerSuccess = &defVal
-				}
-
 				yacu.Webhooks.Append(discordHook, &val.Kind)
 				logger.Debug().Msg("discord webhook client initialized")
 			}

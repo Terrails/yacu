@@ -58,6 +58,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := config.ReadConfigIfFound(path); err != nil {
 		return nil, err
 	}
+	config.Webhooks.applyDefaults()
 	if err := config.ApplyEnvironment(); err != nil {
 		return nil, err
 	}

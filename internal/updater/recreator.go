@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -280,37 +279,15 @@ func (app Yacu) GetDependingContainers(ctx context.Context, dependsOn *container
 			continue
 		}
 
-		// format: service[:condition[:restart]],...
-		for _, value := range strings.Split(val, ",") {
-			depVals := strings.Split(value, ":")
-
-			dependency := depVals[0]
-			if dependency != target {
+		for _, dependency := range yacucontainer.ParseDependsOn(val) {
+			if dependency.Service != target {
 				continue
 			}
-
-			condition := yacucontainer.DEPENDENCY_HEALTHY
-
-			if len(depVals) > 1 {
-				condStr := strings.ToLower(depVals[1])
-				if condStr == "service_started" {
-					condition = yacucontainer.DEPENDENCY_STARTED
-				} else if condStr == "service_completed_successfully" {
-					condition = yacucontainer.DEPENDENCY_COMPLETED
-				} // else DEPENDENCY_HEALTHY
-
-				if len(depVals) > 2 {
-					restart, err := strconv.ParseBool(depVals[2])
-					// can recreate without restarting this container if false
-					if err == nil && !restart {
-						break
-					}
-				}
+			// can recreate without restarting this container if false
+			if dependency.Restart {
+				dependantContainers = append(dependantContainers, yacucontainer.NewDependant(c, app.Updater.StopTimeout, target, dependency.Condition))
 			}
-
-			dependant := yacucontainer.NewDependant(c, app.Updater.StopTimeout, target, condition)
-			dependantContainers = append(dependantContainers, dependant)
-			// can be stopped as there cannot be multiple instances of the same dependency
+			// there cannot be multiple instances of the same dependency
 			break
 		}
 	}
