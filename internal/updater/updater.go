@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/distribution/reference"
@@ -17,7 +18,6 @@ import (
 	"github.com/terrails/yacu/internal/set"
 	"github.com/terrails/yacu/internal/utils"
 	"github.com/terrails/yacu/internal/webhook"
-	"golang.org/x/exp/maps"
 
 	yacucontainer "github.com/terrails/yacu/internal/container"
 	yacuregistry "github.com/terrails/yacu/internal/registry"
@@ -145,7 +145,7 @@ func (app Yacu) ApplyUpdates(ctx context.Context, containers yacucontainer.Conta
 
 	if app.Updater.RemoveImages && len(imgToRemove.Items) > 0 && ctx.Err() == nil {
 		logger.Debug().Int("count", len(imgToRemove.Items)).Msg("Removing unused images")
-		count := app.RemoveUnusedImages(ctx, maps.Values(imgToRemove.Items)...)
+		count := app.RemoveUnusedImages(ctx, slices.Collect(maps.Values(imgToRemove.Items))...)
 		logger.Info().Int("count", count).Msg("Removed unused images")
 	}
 	return len(containers) - successCount
